@@ -1,0 +1,229 @@
+{
+  "release_tickets": [
+    {
+      "id": "PROJ-101",
+      "summary": "Implement OAuth2 authentication",
+      "issue_type": "Story",
+      "priority": "High",
+      "module": "auth",
+      "components": ["backend", "api"],
+      "labels": ["security", "authentication"]
+    },
+    {
+      "id": "PROJ-102",
+      "summary": "Add payment gateway integration",
+      "issue_type": "Story",
+      "priority": "Critical",
+      "module": "payment",
+      "components": ["backend", "payment"]
+    },
+    {
+      "id": "PROJ-201",
+      "summary": "Login redirect fails after password reset",
+      "issue_type": "Bug",
+      "priority": "Critical",
+      "module": "auth",
+      "components": ["backend"]
+    },
+    {
+      "id": "PROJ-202",
+      "summary": "Session timeout not working correctly",
+      "issue_type": "Bug",
+      "priority": "High",
+      "module": "auth"
+    },
+    {
+      "id": "PROJ-203",
+      "summary": "Payment confirmation email not sent",
+      "issue_type": "Bug",
+      "priority": "High",
+      "module": "payment",
+      "components": ["backend", "notification"]
+    }
+  ],
+  "impacted_modules": [
+    "auth",
+    "payment",
+    "notification"
+  ],
+  "available_test_cases": [
+    {
+      "id": "TC-001",
+      "title": "Verify user login with valid credentials",
+      "priority": "Critical",
+      "module": "auth",
+      "section": "Authentication > Login",
+      "tags": ["smoke", "critical", "authentication"],
+      "estimated_duration": 5
+    },
+    {
+      "id": "TC-002",
+      "title": "Verify user logout functionality",
+      "priority": "Critical",
+      "module": "auth",
+      "section": "Authentication > Logout",
+      "tags": ["smoke", "critical"],
+      "estimated_duration": 3
+    },
+    {
+      "id": "TC-003",
+      "title": "Verify password reset flow",
+      "priority": "Critical",
+      "module": "auth",
+      "section": "Authentication > Password Reset",
+      "tags": ["critical", "security"],
+      "estimated_duration": 8
+    },
+    {
+      "id": "TC-010",
+      "title": "Verify session timeout after inactivity",
+      "priority": "High",
+      "module": "auth",
+      "section": "Session Management",
+      "tags": ["session", "security"],
+      "estimated_duration": 10
+    },
+    {
+      "id": "TC-011",
+      "title": "Verify OAuth2 login flow",
+      "priority": "High",
+      "module": "auth",
+      "section": "Authentication > OAuth",
+      "tags": ["oauth", "integration"],
+      "estimated_duration": 12
+    },
+    {
+      "id": "TC-020",
+      "title": "Verify payment processing for valid card",
+      "priority": "Critical",
+      "module": "payment",
+      "section": "Payment > Processing",
+      "tags": ["smoke", "critical", "payment"],
+      "estimated_duration": 10
+    },
+    {
+      "id": "TC-021",
+      "title": "Verify payment failure handling",
+      "priority": "Critical",
+      "module": "payment",
+      "section": "Payment > Error Handling",
+      "tags": ["critical", "payment"],
+      "estimated_duration": 8
+    },
+    {
+      "id": "TC-030",
+      "title": "Verify payment confirmation email",
+      "priority": "High",
+      "module": "notification",
+      "section": "Payment > Notifications",
+      "tags": ["notification", "payment"],
+      "estimated_duration": 5
+    },
+    {
+      "id": "TC-040",
+      "title": "Verify user profile update",
+      "priority": "High",
+      "module": "user",
+      "section": "User Management > Profile",
+      "tags": ["user", "profile"],
+      "estimated_duration": 6
+    },
+    {
+      "id": "TC-050",
+      "title": "Verify user settings persistence",
+      "priority": "Medium",
+      "module": "user",
+      "section": "User Management > Settings",
+      "tags": ["user"],
+      "estimated_duration": 4
+    },
+    {
+      "id": "TC-060",
+      "title": "Verify email notification delivery",
+      "priority": "High",
+      "module": "notification",
+      "section": "Notifications > Email",
+      "tags": ["notification", "email"],
+      "estimated_duration": 5
+    },
+    {
+      "id": "TC-070",
+      "title": "Verify push notification delivery",
+      "priority": "Medium",
+      "module": "notification",
+      "section": "Notifications > Push",
+      "tags": ["notification", "push"],
+      "estimated_duration": 7
+    },
+    {
+      "id": "TC-080",
+      "title": "Verify CSV export functionality",
+      "priority": "Medium",
+      "module": "report",
+      "section": "Reports > Export",
+      "tags": ["report", "export"],
+      "estimated_duration": 8
+    },
+    {
+      "id": "TC-100",
+      "title": "E2E: Complete user registration and login flow",
+      "priority": "Critical",
+      "module": "auth",
+      "section": "End-to-End > User Journey",
+      "tags": ["e2e", "critical", "integration"],
+      "dependencies": ["TC-001", "TC-002"],
+      "estimated_duration": 20
+    },
+    {
+      "id": "TC-101",
+      "title": "E2E: Complete purchase flow with payment",
+      "priority": "Critical",
+      "module": "payment",
+      "section": "End-to-End > Purchase",
+      "tags": ["e2e", "critical", "integration"],
+      "dependencies": ["TC-020", "TC-030"],
+      "estimated_duration": 25
+    },
+    {
+      "id": "TC-102",
+      "title": "E2E: User profile update and notification",
+      "priority": "High",
+      "module": "user",
+      "section": "End-to-End > Profile",
+      "tags": ["e2e", "integration"],
+      "dependencies": ["TC-040", "TC-060"],
+      "estimated_duration": 15
+    },
+    {
+      "id": "TC-200",
+      "title": "General system health check",
+      "priority": "Medium",
+      "module": "general",
+      "section": "System > Health",
+      "estimated_duration": 3
+    },
+    {
+      "id": "TC-201",
+      "title": "API rate limiting verification",
+      "priority": "Medium",
+      "module": "api",
+      "section": "API > Security",
+      "estimated_duration": 10
+    },
+    {
+      "id": "TC-202",
+      "title": "Database connection pooling test",
+      "priority": "Low",
+      "module": "database",
+      "section": "Infrastructure > Database",
+      "estimated_duration": 8
+    }
+  ],
+  "historical_failures": {
+    "TC-010": 8,
+    "TC-011": 5,
+    "TC-030": 12,
+    "TC-070": 4,
+    "TC-101": 3
+  }
+}

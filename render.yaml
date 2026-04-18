@@ -1,0 +1,82 @@
+services:
+  - type: web
+    name: suitecraft-backend
+    env: python
+    rootDir: backend
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: DATABASE_URL
+        fromDatabase:
+          name: suitecraft-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: 10080
+      - key: STARTUP_CREATE_SCHEMA
+        value: false
+      - key: USE_GROQ
+        value: true
+      - key: GROQ_MODEL
+        value: llama-3.1-8b-instant
+      - key: GROQ_API_KEY
+        sync: false
+      - key: FRONTEND_URL
+        value: https://suitecraft-frontend.onrender.com
+      - key: CORS_ORIGINS
+        value: '["https://suitecraft-frontend.onrender.com"]'
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM_EMAIL
+        sync: false
+      - key: JIRA_API_URL
+        sync: false
+      - key: JIRA_API_EMAIL
+        sync: false
+      - key: JIRA_API_TOKEN
+        sync: false
+      - key: TESTRAIL_URL
+        sync: false
+      - key: TESTRAIL_USER
+        sync: false
+      - key: TESTRAIL_API_KEY
+        sync: false
+      - key: TESTRAIL_PROJECT_ID
+        sync: false
+      - key: TESTRAIL_SUITE_ID
+        sync: false
+
+  - type: static
+    name: suitecraft-frontend
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    publishPath: dist
+    pullRequestPreviewsEnabled: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        value: https://suitecraft-backend.onrender.com
+
+databases:
+  - name: suitecraft-db
+    plan: free
+    databaseName: suitecraft
+    user: suitecraft_user
