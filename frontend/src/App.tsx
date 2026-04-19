@@ -298,7 +298,8 @@ function AppLoadingFallback() {
         alignItems: 'center',
         justifyContent: 'center',
         px: 3,
-        background: SUITECRAFT_TOKENS.colors.background.main,
+        background: SUITECRAFT_TOKENS.colors.background.platformGradient,
+        backgroundAttachment: 'fixed',
       }}
     >
       <Stack

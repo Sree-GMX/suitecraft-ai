@@ -318,7 +318,8 @@ async def test_plan_health():
     except:
         pass
     
-    # Check Groq
+    # Check cloud providers
+    gemini_available = bool(settings.GEMINI_API_KEY)
     groq_available = bool(settings.GROQ_API_KEY)
     
     return {
@@ -328,6 +329,11 @@ async def test_plan_health():
                 "available": ollama_available,
                 "url": settings.OLLAMA_BASE_URL,
                 "model": settings.OLLAMA_MODEL
+            },
+            "gemini": {
+                "available": gemini_available,
+                "configured": gemini_available,
+                "model": settings.GEMINI_MODEL
             },
             "groq": {
                 "available": groq_available,

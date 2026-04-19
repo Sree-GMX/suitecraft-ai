@@ -9,12 +9,15 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     STARTUP_CREATE_SCHEMA: bool = False
     
-    # AI Configuration - Supports both Ollama (local) and Groq (cloud)
+    # AI Configuration - Supports Ollama (local), Groq, and Gemini
     USE_GROQ: bool = False
+    USE_GEMINI: bool = False
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.1"
     GROQ_API_KEY: Optional[str] = None
     GROQ_MODEL: str = "llama-3.1-8b-instant"
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_MODEL: str = "gemini-flash-latest"
     
     # CSV Data (Hackathon simplified - no Google Sheets needed)
     # Data is loaded directly from CSV files

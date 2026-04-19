@@ -7,6 +7,13 @@
 
   color-scheme: light;
   color: #16252C;
+  background:
+    radial-gradient(circle at 12% 18%, rgba(255, 96, 156, 0.13) 0%, rgba(255, 96, 156, 0.04) 15%, transparent 34%),
+    radial-gradient(circle at 86% 14%, rgba(255, 166, 77, 0.12) 0%, rgba(255, 166, 77, 0.04) 15%, transparent 36%),
+    radial-gradient(circle at 28% 78%, rgba(56, 213, 219, 0.10) 0%, rgba(56, 213, 219, 0.035) 14%, transparent 30%),
+    radial-gradient(circle at 76% 72%, rgba(138, 92, 246, 0.08) 0%, rgba(138, 92, 246, 0.03) 14%, transparent 30%),
+    radial-gradient(circle at 50% 12%, rgba(255,255,255,0.84) 0%, rgba(255,255,255,0.36) 28%, transparent 50%),
+    linear-gradient(145deg, #fffaf8 0%, #fffdf7 24%, #fbfeff 50%, #fdfbff 74%, #f8fcf9 100%);
   background-color: #F2F7F7;
 
   font-synthesis: none;
@@ -31,6 +38,8 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  background: inherit;
+  background-attachment: fixed;
 }
 
 #root {

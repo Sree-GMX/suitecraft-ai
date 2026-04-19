@@ -259,6 +259,7 @@ export default function Releases() {
 
     const releaseData = {
       ...releaseForm,
+      status: releaseDialogMode === 'create' ? 'planning' : releaseForm.status,
       target_date: releaseForm.target_date || null,
     };
 
@@ -775,8 +776,8 @@ export default function Releases() {
                 </Typography>
                 <Typography variant="body2" sx={{ color: '#607480', maxWidth: 440 }}>
                   {releaseDialogMode === 'create'
-                    ? 'Set the release context, target date, and starting status before planning begins.'
-                    : 'Adjust the release metadata and status without leaving the workspace.'}
+                    ? 'Set the release context and target date. Workflow status will update automatically as the release progresses.'
+                    : 'Adjust the release metadata without leaving the workspace. Workflow status updates automatically from the release flow.'}
                 </Typography>
               </Stack>
             </DialogTitle>
@@ -847,20 +848,6 @@ export default function Releases() {
                   }}
                   sx={RELEASE_MODAL_FIELD_SX}
                 />
-                <TextField
-                  select
-                  label={releaseDialogMode === 'create' ? 'Initial Status' : 'Current Status'}
-                  value={releaseForm.status}
-                  onChange={(e) => setReleaseForm({ ...releaseForm, status: e.target.value })}
-                  fullWidth
-                  sx={RELEASE_MODAL_FIELD_SX}
-                >
-                  {Object.entries(STATUS_CONFIG).map(([value, config]) => (
-                    <MenuItem key={value} value={value}>
-                      {config.label}
-                    </MenuItem>
-                  ))}
-                </TextField>
                 {(createMutation.isError || updateMutation.isError) && (
                   <Alert severity="error">
                     {releaseDialogMode === 'create' ? 'Failed to create release.' : 'Failed to update release.'}{' '}

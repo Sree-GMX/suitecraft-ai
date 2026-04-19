@@ -8,7 +8,13 @@ import {
   IconButton,
   Stack,
   Chip,
+  Button,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
 } from '@mui/material';
+import { useState } from 'react';
 import {
   Logout as LogoutIcon,
 } from '@mui/icons-material';
@@ -17,6 +23,8 @@ import { Logo } from './Logo';
 import { QABotWidget } from './qabot/QABotWidget';
 
 export default function MainLayout() {
+  const [showLogoutDialog, setShowLogoutDialog] = useState(false);
+
   const handleLogout = () => {
     // Clear only authentication-related data, preserve workflow progress
     const keysToRemove = ['access_token', 'user', 'isAuthenticated'];
@@ -30,12 +38,12 @@ export default function MainLayout() {
       display: 'flex',
       flexDirection: 'column',
       position: 'relative',
-      overflow: 'hidden',
+      overflowX: 'hidden',
       background: SUITECRAFT_TOKENS.colors.background.platformGradient,
     }}>
       <Box
         sx={{
-          position: 'absolute',
+          position: 'fixed',
           inset: 0,
           background:
             'linear-gradient(180deg, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0) 58%, rgba(200,106,75,0.06) 100%)',
@@ -45,37 +53,42 @@ export default function MainLayout() {
       />
       <Box
         sx={{
-          position: 'absolute',
+          position: 'fixed',
           inset: 0,
           pointerEvents: 'none',
           zIndex: 0,
-          opacity: 0.5,
+          opacity: 0.62,
           backgroundImage: `
             linear-gradient(115deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.22) 48%, rgba(255,255,255,0) 100%),
-            radial-gradient(circle at 20% 72%, rgba(56,213,219,0.18) 0 2px, transparent 2.5px),
-            radial-gradient(circle at 68% 78%, rgba(200,106,75,0.16) 0 1.5px, transparent 2px),
+            radial-gradient(circle at 18% 24%, rgba(255, 96, 156, 0.18) 0 120px, transparent 280px),
+            radial-gradient(circle at 84% 18%, rgba(255, 166, 77, 0.18) 0 120px, transparent 280px),
+            radial-gradient(circle at 20% 72%, rgba(56,213,219,0.18) 0 140px, transparent 320px),
+            radial-gradient(circle at 68% 78%, rgba(200,106,75,0.16) 0 130px, transparent 300px),
+            radial-gradient(circle at 78% 64%, rgba(138, 92, 246, 0.14) 0 120px, transparent 290px),
             linear-gradient(180deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.14) 68%, rgba(255,255,255,0.22) 100%)
           `,
-          backgroundSize: '100% 100%, 160px 160px, 210px 210px, 100% 100%',
-          backgroundPosition: '0 0, 0 0, 48px 24px, 0 0',
+          backgroundSize: '100% 100%, 100% 100%, 100% 100%, 100% 100%, 100% 100%, 100% 100%, 100% 100%',
+          backgroundPosition: 'center, center, center, center, center, center, center',
           maskImage: 'linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.08) 48%, rgba(0,0,0,0.88) 100%)',
           WebkitMaskImage: 'linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.08) 48%, rgba(0,0,0,0.88) 100%)',
         }}
       />
       <Box
         sx={{
-          position: 'absolute',
+          position: 'fixed',
           left: 0,
           right: 0,
           bottom: 0,
-          height: '34vh',
-          minHeight: 220,
-          maxHeight: 360,
+          height: '42vh',
+          minHeight: 260,
+          maxHeight: 440,
           pointerEvents: 'none',
           zIndex: 0,
-          opacity: 0.75,
+          opacity: 0.86,
           backgroundImage: `
+            radial-gradient(circle at 18% 88%, rgba(255, 96, 156, 0.16) 0%, rgba(255, 96, 156, 0.08) 16%, transparent 36%),
             radial-gradient(circle at 50% 8%, rgba(255,255,255,0.36) 0%, rgba(255,255,255,0.18) 18%, rgba(255,255,255,0) 46%),
+            radial-gradient(circle at 78% 82%, rgba(56, 213, 219, 0.14) 0%, rgba(56, 213, 219, 0.06) 16%, transparent 34%),
             repeating-linear-gradient(90deg, rgba(255,255,255,0.18) 0 1px, transparent 1px 32px),
             repeating-linear-gradient(0deg, rgba(56,213,219,0.08) 0 1px, transparent 1px 24px),
             linear-gradient(180deg, rgba(255,255,255,0) 0%, rgba(244,248,249,0.48) 34%, rgba(228,238,241,0.82) 100%)
@@ -151,7 +164,7 @@ export default function MainLayout() {
             </Stack>
             
             <IconButton 
-              onClick={handleLogout}
+              onClick={() => setShowLogoutDialog(true)}
               sx={{ 
                 width: 46,
                 height: 46,
@@ -185,6 +198,48 @@ export default function MainLayout() {
       >
         <Outlet />
       </Container>
+
+      <Dialog
+        open={showLogoutDialog}
+        onClose={() => setShowLogoutDialog(false)}
+        maxWidth="xs"
+        fullWidth
+        PaperProps={{
+          elevation: 0,
+          sx: {
+            borderRadius: 3,
+            border: '1px solid rgba(255,255,255,0.54)',
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.88) 0%, rgba(247,251,252,0.78) 100%)',
+            backdropFilter: SUITECRAFT_TOKENS.effects.glass.md,
+            boxShadow: '0 20px 40px rgba(15, 23, 42, 0.12)',
+          },
+        }}
+      >
+        <DialogTitle sx={{ fontWeight: 800, color: '#0F172A' }}>
+          Log out?
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.7 }}>
+            You’ll be signed out of SuiteCraft, but your local workflow progress will stay available on this machine.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 3 }}>
+          <Button
+            onClick={() => setShowLogoutDialog(false)}
+            sx={{ textTransform: 'none', fontWeight: 700 }}
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={handleLogout}
+            variant="contained"
+            color="error"
+            sx={{ textTransform: 'none', fontWeight: 700, borderRadius: 999 }}
+          >
+            Log Out
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <QABotWidget />
     </Box>

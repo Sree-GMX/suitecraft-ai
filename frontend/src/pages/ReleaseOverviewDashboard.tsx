@@ -81,6 +81,34 @@ const WORKFLOW_STEPS = [
   },
 ];
 
+type PersistedWorkflowState = {
+  currentStep?: 1 | 2 | 3 | 4;
+  step1Complete?: boolean;
+  step2Complete?: boolean;
+  step3Complete?: boolean;
+  step4Complete?: boolean;
+  selectedTickets?: any[];
+  selectedTestCases?: any[];
+  generatedTestPlan?: any;
+};
+
+function readPersistedWorkflowState(releaseId: string | undefined): PersistedWorkflowState | null {
+  if (!releaseId || typeof window === 'undefined') {
+    return null;
+  }
+
+  try {
+    const savedState = localStorage.getItem(`workflow_${releaseId}`);
+    if (!savedState) {
+      return null;
+    }
+
+    return JSON.parse(savedState) as PersistedWorkflowState;
+  } catch {
+    return null;
+  }
+}
+
 function SectionState({
   icon,
   title,
@@ -242,6 +270,7 @@ export default function ReleaseOverviewDashboard() {
   const navigate = useNavigate();
   const numericReleaseId = Number(releaseId);
   const hasValidReleaseId = Number.isFinite(numericReleaseId) && numericReleaseId > 0;
+  const persistedWorkflowState = readPersistedWorkflowState(releaseId);
 
   // Fetch release
   const {
@@ -380,22 +409,93 @@ export default function ReleaseOverviewDashboard() {
   });
   const statusConfig =
     STATUS_CONFIG[workflowSummary.effectiveStatus as keyof typeof STATUS_CONFIG] || STATUS_CONFIG.planning;
-  const overallProgress = workflowSummary.overallProgress;
-  const workflowProgress = workflowSummary.workflowProgress;
   const latestRun = [...testRuns].sort(
     (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
   )[0];
-  const scopedItems = metrics?.feature_breakdown?.total || 0;
+  const scopedItems = persistedWorkflowState?.selectedTickets?.length ?? metrics?.feature_breakdown?.total ?? 0;
+  const selectedTests = persistedWorkflowState?.selectedTestCases?.length ?? metrics?.test_suite_summary?.total_test_cases ?? 0;
+  const strategySummary = persistedWorkflowState?.generatedTestPlan?.summary;
+  const strategyTests = strategySummary?.total_tests ?? metrics?.test_suite_summary?.total_test_cases ?? 0;
+  const newScenarios = strategySummary?.new_scenarios ?? 0;
+  const currentWorkflowStep =
+    persistedWorkflowState?.currentStep && persistedWorkflowState.currentStep >= 1 && persistedWorkflowState.currentStep <= 4
+      ? persistedWorkflowState.currentStep
+      : persistedWorkflowState?.step3Complete
+        ? 4
+        : persistedWorkflowState?.step2Complete
+          ? 3
+          : persistedWorkflowState?.step1Complete
+            ? 2
+            : 1;
+  const maxEnabledStep =
+    persistedWorkflowState?.step3Complete
+      ? 4
+      : persistedWorkflowState?.step2Complete
+        ? 3
+        : persistedWorkflowState?.step1Complete
+          ? 2
+          : 1;
   const generatedTests = metrics?.test_suite_summary?.total_test_cases || 0;
   const coverageProgress = metrics?.regression_coverage_percentage || 0;
   const executedCount = latestRun?.executed_count || 0;
   const failedCount = latestRun?.failed_count || 0;
   const skippedCount = latestRun?.skipped_count || 0;
   const pendingExecutions = Math.max((latestRun?.total_test_cases || generatedTests) - executedCount, 0);
+  const executionTotal = latestRun?.total_test_cases || strategyTests || generatedTests;
+  const runTestsProgress = executionTotal > 0 ? Math.round((executedCount / executionTotal) * 100) : 0;
+  const overallProgress = Math.round(
+    (
+      (persistedWorkflowState?.step1Complete ? 100 : 0) +
+      (persistedWorkflowState?.step2Complete ? 100 : 0) +
+      (persistedWorkflowState?.step3Complete ? 100 : 0) +
+      (persistedWorkflowState?.step4Complete ? 100 : runTestsProgress)
+    ) / 4
+  ) || workflowSummary.overallProgress;
+  const workflowProgress = [
+    {
+      completed: scopedItems,
+      total: Math.max(scopedItems, 1),
+      progress: persistedWorkflowState?.step1Complete ? 100 : 0,
+      helper: scopedItems > 0 ? `${scopedItems} scoped ticket${scopedItems === 1 ? '' : 's'} confirmed` : 'Scope not created yet',
+      enabled: true,
+    },
+    {
+      completed: persistedWorkflowState?.step2Complete ? strategyTests : 0,
+      total: Math.max(strategyTests, 1),
+      progress: persistedWorkflowState?.step2Complete ? 100 : 0,
+      helper: persistedWorkflowState?.step2Complete
+        ? `${strategyTests} strategy tests ready${newScenarios > 0 ? ` • ${newScenarios} new scenarios` : ''}`
+        : 'Strategy has not been generated yet',
+      enabled: maxEnabledStep >= 2,
+    },
+    {
+      completed: persistedWorkflowState?.step3Complete ? strategyTests : 0,
+      total: Math.max(strategyTests, 1),
+      progress: persistedWorkflowState?.step3Complete ? 100 : persistedWorkflowState?.step2Complete ? 45 : 0,
+      helper: persistedWorkflowState?.step3Complete
+        ? `Execution set approved for ${strategyTests} tests`
+        : persistedWorkflowState?.step2Complete
+          ? 'Strategy ready for approval'
+          : 'Approval unlocks after strategy generation',
+      enabled: maxEnabledStep >= 3,
+    },
+    {
+      completed: executedCount,
+      total: Math.max(executionTotal, 1),
+      progress: runTestsProgress,
+      helper: latestRun
+        ? `${latestRun.name} • ${failedCount} failed • ${pendingExecutions} pending`
+        : 'Execution has not started yet',
+      enabled: maxEnabledStep >= 4,
+    },
+  ];
   const showMetricsLoadingState = loadingMetrics || loadingRuns;
   const hasMetricsData = Boolean(metrics);
   const hasRunData = testRuns.length > 0;
   const showExecutionEmptyState = !showMetricsLoadingState && !hasMetricsData && !hasRunData;
+  const navigateToWorkflowStep = (step: 1 | 2 | 3 | 4) => {
+    navigate(`/unified-workflow/${releaseId}?step=${step}`);
+  };
 
   return (
     <Box sx={{ minHeight: '100vh', background: 'transparent', py: 4 }}>
@@ -470,7 +570,7 @@ export default function ReleaseOverviewDashboard() {
                     size="large"
                     fullWidth
                     startIcon={<TrendingIcon />}
-                    onClick={() => navigate(`/unified-workflow/${releaseId}`)}
+                    onClick={() => navigateToWorkflowStep(currentWorkflowStep)}
                     sx={{
                       bgcolor: SUITECRAFT_TOKENS.colors.primary,
                       py: 1.5,
@@ -478,21 +578,7 @@ export default function ReleaseOverviewDashboard() {
                       fontWeight: 700,
                     }}
                   >
-                    Open Workflow
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="large"
-                    fullWidth
-                    startIcon={<EditIcon />}
-                    onClick={() => navigate('/releases')}
-                    sx={{
-                      py: 1.5,
-                      textTransform: 'none',
-                      fontWeight: 600,
-                    }}
-                  >
-                    Back to Releases
+                    Resume Workflow
                   </Button>
                 </Stack>
               </Grid>
@@ -545,25 +631,35 @@ export default function ReleaseOverviewDashboard() {
                 </Typography>
                 <Grid container spacing={2}>
                   {WORKFLOW_STEPS.map((step, index) => {
-                    const progressData = Object.values(workflowProgress)[index];
+                    const progressData = workflowProgress[index];
+                    const isDisabled = !progressData.enabled;
                     return (
                       <Grid item xs={12} sm={6} key={step.id}>
                         <Paper
                           elevation={0}
                           sx={{
                             p: 2.5,
-                            border: '1px solid rgba(0, 0, 0, 0.06)',
+                            border: `1px solid ${isDisabled ? 'rgba(148, 163, 184, 0.22)' : 'rgba(0, 0, 0, 0.06)'}`,
                             borderRadius: 2,
                             height: '100%',
-                            transition: 'all 0.2s ease',
-                            cursor: 'pointer',
-                            '&:hover': {
-                              borderColor: step.color,
-                              boxShadow: `0 4px 12px ${step.color}20`,
-                              transform: 'translateY(-2px)',
-                            },
+                            transition: 'border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease, opacity 0.2s ease',
+                            cursor: isDisabled ? 'not-allowed' : 'pointer',
+                            opacity: isDisabled ? 0.58 : 1,
+                            ...(isDisabled
+                              ? {}
+                              : {
+                                  '&:hover': {
+                                    borderColor: step.color,
+                                    boxShadow: `0 4px 12px ${step.color}20`,
+                                    transform: 'translateY(-2px)',
+                                  },
+                                }),
                           }}
-                          onClick={() => navigate(`/unified-workflow/${releaseId}`)}
+                          onClick={() => {
+                            if (!isDisabled) {
+                              navigateToWorkflowStep(step.id as 1 | 2 | 3 | 4);
+                            }
+                          }}
                         >
                           <Stack direction="row" spacing={2} alignItems="flex-start">
                             <Avatar
@@ -586,6 +682,18 @@ export default function ReleaseOverviewDashboard() {
                               <Typography variant="caption" color="text.secondary" display="block" mb={1.5}>
                                 {progressData.helper}
                               </Typography>
+                              {isDisabled && (
+                                <Chip
+                                  label="Locked"
+                                  size="small"
+                                  sx={{
+                                    mb: 1.5,
+                                    bgcolor: 'rgba(148, 163, 184, 0.16)',
+                                    color: '#64748B',
+                                    fontWeight: 700,
+                                  }}
+                                />
+                              )}
                               <Stack direction="row" justifyContent="space-between" alignItems="center" mb={0.5}>
                                 <Typography variant="caption" fontWeight={600}>
                                   {progressData.completed} / {progressData.total}
@@ -734,10 +842,10 @@ export default function ReleaseOverviewDashboard() {
                       <Button
                         variant="outlined"
                         startIcon={<TrendingIcon />}
-                        onClick={() => navigate(`/unified-workflow/${releaseId}`)}
+                        onClick={() => navigateToWorkflowStep(currentWorkflowStep)}
                         sx={SUITECRAFT_STYLES.secondaryButton}
                       >
-                        Open Workflow
+                        Resume Workflow
                       </Button>
                     }
                   />
@@ -753,7 +861,7 @@ export default function ReleaseOverviewDashboard() {
               <Card elevation={0} sx={{ ...SUITECRAFT_STYLES.glassCard }}>
                 <CardContent sx={{ p: 3 }}>
                   <Typography variant="h6" fontWeight={700} mb={3}>
-                    Key Metrics
+                    Workflow Snapshot
                   </Typography>
                   <Stack spacing={2.5}>
                     <Box>
@@ -761,11 +869,11 @@ export default function ReleaseOverviewDashboard() {
                         <Stack direction="row" spacing={1} alignItems="center">
                           <AssignmentIcon sx={{ fontSize: 20, color: 'text.secondary' }} />
                           <Typography variant="body2" fontWeight={600}>
-                            Features
+                            Scoped Tickets
                           </Typography>
                         </Stack>
                         <Typography variant="h6" fontWeight={700} color="primary.main">
-                          {formatMetricValue(metrics?.feature_breakdown?.total, loadingMetrics)}
+                          {scopedItems}
                         </Typography>
                       </Stack>
                       <Divider />
@@ -775,11 +883,11 @@ export default function ReleaseOverviewDashboard() {
                         <Stack direction="row" spacing={1} alignItems="center">
                           <TestIcon sx={{ fontSize: 20, color: 'text.secondary' }} />
                           <Typography variant="body2" fontWeight={600}>
-                            Test Cases
+                            Selected Tests
                           </Typography>
                         </Stack>
                         <Typography variant="h6" fontWeight={700} color="primary.main">
-                          {formatMetricValue(metrics?.test_suite_summary?.total_test_cases, loadingMetrics)}
+                          {selectedTests}
                         </Typography>
                       </Stack>
                       <Divider />
@@ -787,13 +895,13 @@ export default function ReleaseOverviewDashboard() {
                     <Box>
                       <Stack direction="row" justifyContent="space-between" alignItems="center" mb={1}>
                         <Stack direction="row" spacing={1} alignItems="center">
-                          <PeopleIcon sx={{ fontSize: 20, color: 'text.secondary' }} />
+                          <SparklesIcon sx={{ fontSize: 20, color: 'text.secondary' }} />
                           <Typography variant="body2" fontWeight={600}>
-                            Team Members
+                            Strategy Tests
                           </Typography>
                         </Stack>
                         <Typography variant="h6" fontWeight={700} color="primary.main">
-                          {(release.collaborators?.length || 0) + 1}
+                          {persistedWorkflowState?.step2Complete ? strategyTests : '\u2014'}
                         </Typography>
                       </Stack>
                       <Divider />
@@ -803,78 +911,15 @@ export default function ReleaseOverviewDashboard() {
                         <Stack direction="row" spacing={1} alignItems="center">
                           <SpeedIcon sx={{ fontSize: 20, color: 'text.secondary' }} />
                           <Typography variant="body2" fontWeight={600}>
-                            Test Coverage
+                            Current Step
                           </Typography>
                         </Stack>
                         <Typography variant="h6" fontWeight={700} color="primary.main">
-                          {loadingMetrics ? '...' : metrics ? `${Math.round(coverageProgress)}%` : '\u2014'}
+                          {`Step ${currentWorkflowStep}`}
                         </Typography>
                       </Stack>
                       <Divider />
                     </Box>
-                  </Stack>
-                </CardContent>
-              </Card>
-
-              {/* Quick Actions */}
-              <Card elevation={0} sx={{ ...SUITECRAFT_STYLES.glassCard }}>
-                <CardContent sx={{ p: 3 }}>
-                  <Typography variant="h6" fontWeight={700} mb={2}>
-                    Quick Actions
-                  </Typography>
-                  <Stack spacing={1.5}>
-                    <Button
-                      variant="outlined"
-                      fullWidth
-                      startIcon={<ListIcon />}
-                      onClick={() => navigate(`/unified-workflow/${releaseId}`)}
-                      sx={{
-                        justifyContent: 'flex-start',
-                        textTransform: 'none',
-                        py: 1.5,
-                      }}
-                    >
-                      Scope Release
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      fullWidth
-                      startIcon={<TestIcon />}
-                      onClick={() => navigate(`/unified-workflow/${releaseId}`)}
-                      sx={{
-                        justifyContent: 'flex-start',
-                        textTransform: 'none',
-                        py: 1.5,
-                      }}
-                    >
-                      Generate Strategy
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      fullWidth
-                      startIcon={<GroupsIcon />}
-                      onClick={() => navigate(`/unified-workflow/${releaseId}`)}
-                      sx={{
-                        justifyContent: 'flex-start',
-                        textTransform: 'none',
-                        py: 1.5,
-                      }}
-                    >
-                      Approve Execution Set
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      fullWidth
-                      startIcon={<ExecuteIcon />}
-                      onClick={() => navigate(`/unified-workflow/${releaseId}`)}
-                      sx={{
-                        justifyContent: 'flex-start',
-                        textTransform: 'none',
-                        py: 1.5,
-                      }}
-                    >
-                      Run Tests
-                    </Button>
                   </Stack>
                 </CardContent>
               </Card>

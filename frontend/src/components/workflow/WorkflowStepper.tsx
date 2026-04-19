@@ -79,13 +79,16 @@ export default function WorkflowStepper({
     const distance = Math.abs(focusStep - stepNumber);
 
     if (hoveredStep === null) {
-      return isActive ? 1.08 : 1;
+      if (distance === 0) return 1.12;
+      if (distance === 1) return 0.9;
+      if (distance === 2) return 0.82;
+      return 0.76;
     }
 
-    if (distance === 0) return isActive ? 1.18 : 1.14;
-    if (distance === 1) return 1.07;
-    if (distance === 2) return 1.02;
-    return 0.99;
+    if (distance === 0) return isActive ? 1.2 : 1.1;
+    if (distance === 1) return 0.96;
+    if (distance === 2) return 0.88;
+    return 0.8;
   };
 
   return (
@@ -101,9 +104,9 @@ export default function WorkflowStepper({
           position: 'relative',
           display: 'inline-flex',
           flexDirection: 'column',
-          gap: 1.35,
+          gap: 0.65,
           px: 1.2,
-          py: 1.5,
+          py: 1.25,
           borderRadius: 999,
           border: '1px solid rgba(255,255,255,0.64)',
           background: 'linear-gradient(180deg, rgba(255,255,255,0.36) 0%, rgba(241,245,249,0.18) 100%)',
@@ -121,7 +124,16 @@ export default function WorkflowStepper({
           const scale = getDockScale(step.number, isActive);
 
           return (
-            <Box key={step.number} sx={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+            <Box
+              key={step.number}
+              sx={{
+                position: 'relative',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                py: isActive ? 0.28 : 0.12,
+              }}
+            >
               <Box
                 component="button"
                 type="button"
@@ -145,10 +157,10 @@ export default function WorkflowStepper({
                       : 'rgba(255,255,255,0.54)',
                   color: isComplete ? '#FFFFFF' : isActive ? step.accent : '#475569',
                   boxShadow: isComplete
-                    ? `0 18px 30px ${step.accent}40`
+                    ? `0 18px 30px ${step.accent}${isActive ? '46' : '32'}`
                     : isActive
-                      ? `0 14px 28px ${step.accent}24`
-                      : '0 10px 22px rgba(15, 23, 42, 0.10)',
+                      ? `0 16px 30px ${step.accent}28`
+                      : '0 8px 18px rgba(15, 23, 42, 0.08)',
                   transform: `scale(${scale})`,
                   transformOrigin: 'center center',
                   transition: 'transform 180ms ease, box-shadow 180ms ease, background-color 180ms ease, border-color 180ms ease',

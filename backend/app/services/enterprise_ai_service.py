@@ -12,6 +12,14 @@ import httpx
 import hashlib
 from datetime import datetime
 import asyncio
+import logging
+
+STEP2_CONCURRENT_BATCHES = 3
+STEP2_GEMINI_CONCURRENT_BATCHES = 1
+STEP2_TASK_TIMEOUT_SECONDS = 25
+GEMINI_MAX_RETRIES = 2
+
+logger = logging.getLogger(__name__)
 
 class EnterpriseAIService:
     """
@@ -23,10 +31,13 @@ class EnterpriseAIService:
     """
     
     def __init__(self):
+        self.use_gemini = getattr(settings, 'USE_GEMINI', False)
         self.use_groq = getattr(settings, 'USE_GROQ', False)
+        self.use_ollama = bool(settings.OLLAMA_BASE_URL)
         self.ollama_url = settings.OLLAMA_BASE_URL
         self.ollama_model = settings.OLLAMA_MODEL
         self._plan_cache: Dict[str, Dict[str, Any]] = {}
+        self._last_provider_issue: Optional[str] = None
         
         # Initialize Groq client if available
         self.groq_client = None
@@ -36,6 +47,72 @@ class EnterpriseAIService:
                 self.groq_client = Groq(api_key=settings.GROQ_API_KEY)
             except Exception:
                 self.groq_client = None
+        self.gemini_api_key = getattr(settings, 'GEMINI_API_KEY', None)
+        self.gemini_model = getattr(settings, 'GEMINI_MODEL', 'gemini-flash-latest')
+
+    async def _call_gemini(
+        self,
+        prompt: str,
+        system_prompt: str,
+        temperature: float = 0.1,
+        max_tokens: int = 4000,
+        json_mode: bool = True,
+    ) -> str:
+        if not self.gemini_api_key:
+            return ""
+
+        generation_config: Dict[str, Any] = {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+        }
+        if json_mode:
+            generation_config["responseMimeType"] = "application/json"
+
+        payload = {
+            "system_instruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": generation_config,
+        }
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{self.gemini_model}:generateContent?key={self.gemini_api_key}"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                for attempt in range(GEMINI_MAX_RETRIES):
+                    response = await client.post(url, json=payload)
+                    if response.status_code == 429:
+                        self._last_provider_issue = "gemini_rate_limited"
+                        logger.warning(
+                            "Gemini Step 2 request hit rate limits on attempt %s for model %s",
+                            attempt + 1,
+                            self.gemini_model,
+                        )
+                        if attempt < GEMINI_MAX_RETRIES - 1:
+                            await asyncio.sleep(1.0 + attempt)
+                            continue
+                        return ""
+
+                    if response.status_code != 200:
+                        self._last_provider_issue = f"gemini_http_{response.status_code}"
+                        logger.warning(
+                            "Gemini Step 2 request failed with status %s: %s",
+                            response.status_code,
+                            response.text[:300],
+                        )
+                        return ""
+
+                    result = response.json()
+                    candidates = result.get("candidates", [])
+                    if not candidates:
+                        self._last_provider_issue = "gemini_empty_candidates"
+                        logger.warning("Gemini Step 2 request returned no candidates")
+                        return ""
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    return "".join(part.get("text", "") for part in parts if part.get("text"))
+        except Exception:
+            logger.exception("Gemini Step 2 request failed")
+            return ""
 
     async def _call_ai(
         self, 
@@ -46,9 +123,20 @@ class EnterpriseAIService:
         json_mode: bool = True,
     ) -> str:
         """Unified AI call method that tries Groq first, then Ollama"""
+        self._last_provider_issue = None
+        if self.use_gemini and self.gemini_api_key:
+            result = await self._call_gemini(
+                prompt,
+                system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+            )
+            if result:
+                return result
         
         # Try Groq first if configured
-        if self.use_groq and self.groq_client:
+        if self.groq_client:
             try:
                 request_payload = {
                     "model": settings.GROQ_MODEL,
@@ -68,6 +156,8 @@ class EnterpriseAIService:
                 pass
 
         # Fallback to Ollama
+        if not self.use_ollama:
+            return ""
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
@@ -97,7 +187,7 @@ class EnterpriseAIService:
         system_prompt: str,
         temperature: float = 0.1,
         max_tokens: int = 4000,
-        attempts: int = 3,
+        attempts: int = 2,
         retry_delay_seconds: float = 0.8,
         json_mode: bool = True,
     ) -> str:
@@ -164,6 +254,76 @@ Original output:
         raise ActualAIRequiredError(
             f"Step 2 {step_name} did not receive valid AI JSON output. No hardcoded fallback is allowed for this workflow."
         )
+
+    async def _coerce_json_result(
+        self,
+        response: str,
+        step_name: str,
+        schema_hint: str,
+    ) -> Optional[Dict[str, Any]]:
+        result = self._extract_json(response)
+        if result:
+            return result
+        return await self._repair_json(response, schema_hint, step_name)
+
+    async def _run_json_analysis(
+        self,
+        prompt: str,
+        system_prompt: str,
+        step_name: str,
+        schema_hint: str,
+        temperature: float = 0.1,
+        max_tokens: int = 2500,
+        timeout_seconds: float = STEP2_TASK_TIMEOUT_SECONDS,
+    ) -> Dict[str, Any]:
+        try:
+            response = await asyncio.wait_for(
+                self._call_ai_with_retries(
+                    prompt,
+                    system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=True,
+                ),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            raise ActualAIRequiredError(
+                f"Step 2 {step_name} timed out while waiting for AI output. The active provider did not finish in time."
+            ) from exc
+
+        json_result = await self._coerce_json_result(response, step_name, schema_hint)
+        if json_result:
+            return json_result
+
+        try:
+            fallback_response = await asyncio.wait_for(
+                self._call_ai_with_retries(
+                    prompt,
+                    system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=False,
+                ),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            raise ActualAIRequiredError(
+                f"Step 2 {step_name} timed out while retrying AI output recovery."
+            ) from exc
+
+        fallback_result = await self._coerce_json_result(fallback_response, step_name, schema_hint)
+        if fallback_result:
+            return fallback_result
+
+        if self._last_provider_issue == "gemini_rate_limited" and not self.groq_client:
+            raise ActualAIRequiredError(
+                "Gemini is currently rate limited for Step 2. Wait a minute and retry, or configure Groq as a fallback provider."
+            )
+
+        raise ActualAIRequiredError(
+            f"Step 2 {step_name} did not receive valid AI JSON output after retrying with structured and plain-text recovery."
+        )
     
     async def generate_enterprise_test_plan(
         self,
@@ -182,9 +342,13 @@ Original output:
         4. Test Engineers: Generate detailed test scenarios
         5. Synthesize: Combine all perspectives into comprehensive plan
         """
-        if not ((self.use_groq and self.groq_client) or self.ollama_url):
+        if not (
+            (self.use_gemini and self.gemini_api_key) or
+            self.groq_client or
+            (self.use_ollama and self.ollama_url)
+        ):
             raise ActualAIRequiredError(
-                "Step 2 strategy generation requires a configured AI model. Configure Ollama or Groq and try again."
+                "Step 2 strategy generation requires a configured AI model. Configure Gemini, Groq, or Ollama and try again."
             )
 
         cache_key = self._build_plan_cache_key(tickets, test_cases, release_info)
@@ -202,11 +366,19 @@ Original output:
         # Prepare context
         context = self._prepare_context(tickets, test_cases, release_info)
         
-        # Step 1: Product Owner Perspective
-        po_analysis = await self._product_owner_analysis(context)
-        
-        # Step 2: Product Manager Perspective
-        pm_analysis = await self._product_manager_analysis(context, po_analysis)
+        # Gemini free-tier is prone to throttling on simultaneous JSON calls, so
+        # keep the richer parallel path for other providers and use a safer
+        # sequential path when Gemini is the active backend.
+        if self.use_gemini and self.gemini_api_key:
+            po_analysis = await self._product_owner_analysis(context)
+            pm_analysis = await self._product_manager_analysis(context)
+            parallel_product_tracks = 1
+        else:
+            po_analysis, pm_analysis = await asyncio.gather(
+                self._product_owner_analysis(context),
+                self._product_manager_analysis(context),
+            )
+            parallel_product_tracks = 2
         
         # Step 3: QA Manager Perspective
         qa_analysis = await self._qa_manager_analysis(context, po_analysis, pm_analysis)
@@ -226,6 +398,7 @@ Original output:
             "mode": "fresh" if force_refresh else "new",
             "scope_locked": True,
             "actual_ai_used": True,
+            "parallel_product_tracks": parallel_product_tracks,
         }
         self._plan_cache[cache_key] = json.loads(json.dumps(final_plan))
         return final_plan
@@ -348,39 +521,30 @@ Return ONLY valid JSON:
 {{
     "business_value": "Primary business value statement",
     "critical_features": ["Feature 1", "Feature 2"],
-    "acceptance_criteria": [
-        {{"criterion": "Must complete X", "priority": "critical"}},
-        {{"criterion": "Should complete Y", "priority": "high"}}
-    ],
+    "acceptance_criteria": ["Must complete X", "Should complete Y"],
     "rejection_criteria": ["Show stopper 1", "Show stopper 2"]
 }}
 """
         
-        response = await self._call_ai_with_retries(
+        return await self._run_json_analysis(
             prompt,
             "You are a Product Owner focused on business value and user needs. Return only valid JSON.",
-            temperature=0.1
-        )
-        
-        return await self._require_json(
-            response,
             "product-owner analysis",
             """
 {
   "business_value": "Primary business value statement",
   "critical_features": ["Feature 1", "Feature 2"],
-  "acceptance_criteria": [
-    {"criterion": "Must complete X", "priority": "critical"}
-  ],
+  "acceptance_criteria": ["Must complete X", "Should complete Y"],
   "rejection_criteria": ["Show stopper 1", "Show stopper 2"]
 }
             """.strip(),
+            temperature=0.0,
+            max_tokens=1200,
         )
     
     async def _product_manager_analysis(
-        self, 
+        self,
         context: Dict[str, Any],
-        po_analysis: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Product Manager: Identify scope and feature dependencies"""
         
@@ -394,7 +558,7 @@ Return ONLY valid JSON:
 You are a PRODUCT MANAGER responsible for feature scope and dependencies.
 
 RELEASE: {context['release_version']}
-BUSINESS VALUE: {po_analysis.get('business_value', 'N/A')}
+RELEASE NAME: {context.get('release_name', context['release_version'])}
 
 FEATURES:
 {stories_summary}
@@ -419,14 +583,9 @@ Return ONLY valid JSON:
 }}
 """
         
-        response = await self._call_ai_with_retries(
+        return await self._run_json_analysis(
             prompt,
             "You are a Product Manager focused on scope and technical dependencies. Return only valid JSON.",
-            temperature=0.1
-        )
-        
-        return await self._require_json(
-            response,
             "product-manager analysis",
             """
 {
@@ -441,6 +600,7 @@ Return ONLY valid JSON:
   "integration_points": ["External System A", "API B"]
 }
             """.strip(),
+            temperature=0.1,
         )
     
     async def _qa_manager_analysis(
@@ -520,14 +680,9 @@ Return ONLY valid JSON:
 }}
 """
 
-        response = await self._call_ai_with_retries(
+        return await self._run_json_analysis(
             prompt,
             "You are a QA Manager expert in risk assessment and test strategy. Return only valid JSON.",
-            temperature=0.1
-        )
-
-        return await self._require_json(
-            response,
             "qa-manager analysis",
             """
 {
@@ -571,6 +726,7 @@ Return ONLY valid JSON:
   "go_live_concerns": ["Main concerns before signoff"]
 }
             """.strip(),
+            temperature=0.1,
         )
     
     async def _test_engineer_analysis(
@@ -578,76 +734,15 @@ Return ONLY valid JSON:
         context: Dict[str, Any],
         qa_analysis: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Test Engineers: Generate detailed test scenarios"""
-        
-        # Get sample test cases from different sections
-        sections_sample = {}
-        for section, test_cases in list(context['sections'].items())[:8]:
-            sections_sample[section] = test_cases[:3]
-        
-        sections_info = "\n".join([
-            f"- {section}: {len(cases)} tests available"
-            for section, cases in sections_sample.items()
-        ])
-        
-        prompt = f"""
-You are a SENIOR TEST ENGINEER designing detailed test scenarios.
+        """Test Engineers: Generate detailed test scenarios in parallel section batches."""
 
-RELEASE: {context['release_version']}
-TOTAL TEST CASES: {context['total_test_cases']}
-
-TEST CASE SECTIONS:
-{sections_info}
-
-RISK AREAS: {', '.join([r.get('area', 'N/A') for r in qa_analysis.get('key_risks', [])[:5]])}
-
-YOUR TASK:
-1. Design NEW TEST SCENARIOS for this release
-2. Select EXISTING TEST CASES to execute
-3. Identify EDGE CASES and NEGATIVE SCENARIOS
-4. Define TEST DATA requirements
-5. Explain WHY each new scenario is needed
-6. Tie scenarios back to likely tickets or risk areas when possible
-
-Return ONLY valid JSON:
-{{
-    "new_scenarios": [
-        {{
-            "title": "Scenario title",
-            "priority": "critical|high|medium|low",
-            "related_tickets": ["TICKET-123"],
-            "why_needed": "Why this scenario is needed for this release",
-            "risk_addressed": "What risk or gap it addresses",
-            "scenario_group": "Critical Path|Integration|Data Integrity|Optional Coverage",
-            "estimated_time_minutes": 20,
-            "steps": ["Step 1", "Step 2"],
-            "expected_result": "Expected outcome",
-            "test_data": "Data needed"
-        }}
-    ],
-    "existing_test_selection": [
-        {{
-            "section": "Section name",
-            "test_count": 10,
-            "priority": "critical|high|medium|low",
-            "rationale": "Why these tests"
-        }}
-    ],
-    "edge_cases": ["Edge case 1", "Edge case 2"],
-    "negative_scenarios": ["Negative test 1", "Negative test 2"]
-}}
-"""
-        
-        response = await self._call_ai_with_retries(
-            prompt,
-            "You are a Senior Test Engineer expert in test design. Return only valid JSON.",
-            temperature=0.15
-        )
-        
-        return await self._require_json(
-            response,
-            "test-engineer analysis",
-            """
+        section_items = list(context['sections'].items())[:8]
+        section_batches = [
+            section_items[index:index + 3]
+            for index in range(0, len(section_items), 3)
+        ]
+        risk_areas = [r.get('area', 'N/A') for r in qa_analysis.get('key_risks', [])[:5]]
+        schema_hint = """
 {
   "new_scenarios": [
     {
@@ -674,8 +769,86 @@ Return ONLY valid JSON:
   "edge_cases": ["Edge case 1", "Edge case 2"],
   "negative_scenarios": ["Negative test 1", "Negative test 2"]
 }
-            """.strip(),
+        """.strip()
+
+        max_parallel_batches = (
+            STEP2_GEMINI_CONCURRENT_BATCHES
+            if self.use_gemini and self.gemini_api_key
+            else STEP2_CONCURRENT_BATCHES
         )
+        semaphore = asyncio.Semaphore(max_parallel_batches)
+
+        async def run_batch(batch_index: int, batch: List[Any]) -> Dict[str, Any]:
+            sections_info = "\n".join([
+                f"- {section}: {len(test_cases)} tests available"
+                for section, test_cases in batch
+            ])
+            prompt = f"""
+You are a SENIOR TEST ENGINEER designing detailed test scenarios for one slice of the release.
+
+RELEASE: {context['release_version']}
+TOTAL TEST CASES: {context['total_test_cases']}
+
+TEST CASE SECTIONS IN THIS BATCH:
+{sections_info}
+
+RISK AREAS: {', '.join(risk_areas)}
+
+YOUR TASK:
+1. Design NEW TEST SCENARIOS for this release slice
+2. Select EXISTING TEST SECTIONS to execute
+3. Identify EDGE CASES and NEGATIVE SCENARIOS
+4. Define TEST DATA requirements
+5. Explain WHY each new scenario is needed
+
+Return ONLY valid JSON:
+{schema_hint}
+"""
+            async with semaphore:
+                return await self._run_json_analysis(
+                    prompt,
+                    "You are a Senior Test Engineer expert in test design. Return only valid JSON.",
+                    f"test-engineer analysis batch {batch_index + 1}",
+                    schema_hint,
+                    temperature=0.15,
+                    timeout_seconds=STEP2_TASK_TIMEOUT_SECONDS,
+                )
+
+        batch_results = await asyncio.gather(
+            *(run_batch(index, batch) for index, batch in enumerate(section_batches)),
+            return_exceptions=True,
+        )
+
+        successful_batches = [result for result in batch_results if isinstance(result, dict)]
+        if not successful_batches:
+            raise ActualAIRequiredError(
+                "Step 2 test-engineer analysis did not receive valid AI JSON output from any parallel batch."
+            )
+
+        return {
+            "new_scenarios": [
+                scenario
+                for result in successful_batches
+                for scenario in result.get("new_scenarios", [])
+            ][:12],
+            "existing_test_selection": [
+                selection
+                for result in successful_batches
+                for selection in result.get("existing_test_selection", [])
+            ][:8],
+            "edge_cases": list(dict.fromkeys([
+                edge_case
+                for result in successful_batches
+                for edge_case in result.get("edge_cases", [])
+            ]))[:8],
+            "negative_scenarios": list(dict.fromkeys([
+                scenario
+                for result in successful_batches
+                for scenario in result.get("negative_scenarios", [])
+            ]))[:8],
+            "parallel_batch_count": len(successful_batches),
+            "parallel_batch_limit": max_parallel_batches,
+        }
     
     def _synthesize_test_plan(
         self,

@@ -11,12 +11,23 @@ import json
 import httpx
 import re
 import asyncio
+import logging
+
+STEP1_SECTION_CONCURRENCY = 4
+STEP1_GEMINI_SECTION_CONCURRENCY = 1
+STEP1_SECTION_TIMEOUT_SECONDS = 20
+STEP1_OVERVIEW_TIMEOUT_SECONDS = 20
+GEMINI_MAX_RETRIES = 2
+
+logger = logging.getLogger(__name__)
 
 class AIService:
     def __init__(self):
-        # Check if USE_GROQ is enabled in settings
+        # Provider configuration
+        self.use_gemini = getattr(settings, 'USE_GEMINI', False)
         self.use_groq = getattr(settings, 'USE_GROQ', False)
-        self.use_ollama = not self.use_groq
+        self.use_ollama = bool(settings.OLLAMA_BASE_URL)
+        self._last_provider_issue: Optional[str] = None
         
         # Ollama configuration
         self.ollama_url = settings.OLLAMA_BASE_URL
@@ -30,6 +41,84 @@ class AIService:
                 self.groq_client = Groq(api_key=settings.GROQ_API_KEY)
             except:
                 pass
+
+        # Gemini configuration
+        self.gemini_api_key = getattr(settings, 'GEMINI_API_KEY', None)
+        self.gemini_model = getattr(settings, 'GEMINI_MODEL', 'gemini-flash-latest')
+
+    async def _call_gemini(
+        self,
+        prompt: str,
+        system_prompt: str = "You are an expert QA analyst.",
+        json_mode: bool = False,
+    ) -> str:
+        """Call Gemini via the Generative Language REST API."""
+        if not self.gemini_api_key:
+            return ""
+
+        generation_config: Dict[str, Any] = {
+            "temperature": 0.3,
+            "maxOutputTokens": 4000,
+        }
+        if json_mode:
+            generation_config["responseMimeType"] = "application/json"
+
+        payload = {
+            "system_instruction": {
+                "parts": [{"text": system_prompt}]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
+            ],
+            "generationConfig": generation_config,
+        }
+
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{self.gemini_model}:generateContent?key={self.gemini_api_key}"
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                for attempt in range(GEMINI_MAX_RETRIES):
+                    response = await client.post(url, json=payload)
+                    if response.status_code == 429:
+                        self._last_provider_issue = "gemini_rate_limited"
+                        logger.warning(
+                            "Gemini Step 1 request hit rate limits on attempt %s for model %s",
+                            attempt + 1,
+                            self.gemini_model,
+                        )
+                        if attempt < GEMINI_MAX_RETRIES - 1:
+                            await asyncio.sleep(1.0 + attempt)
+                            continue
+                        return ""
+
+                    if response.status_code != 200:
+                        self._last_provider_issue = f"gemini_http_{response.status_code}"
+                        logger.warning(
+                            "Gemini Step 1 request failed with status %s: %s",
+                            response.status_code,
+                            response.text[:300],
+                        )
+                        return ""
+
+                    result = response.json()
+                    candidates = result.get("candidates", [])
+                    if not candidates:
+                        self._last_provider_issue = "gemini_empty_candidates"
+                        logger.warning("Gemini Step 1 request returned no candidates")
+                        return ""
+
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    text_parts = [part.get("text", "") for part in parts if part.get("text")]
+                    return "".join(text_parts)
+        except Exception:
+            logger.exception("Gemini Step 1 request failed")
+            return ""
     
     async def _call_ollama(self, prompt: str, system_prompt: str = "You are an expert QA analyst.") -> str:
         """Call Ollama API"""
@@ -92,8 +181,14 @@ class AIService:
         json_mode: bool = False,
     ) -> str:
         """Generate AI response using available service"""
+        self._last_provider_issue = None
+        if self.use_gemini and self.gemini_api_key:
+            response = await self._call_gemini(prompt, system_prompt, json_mode=json_mode)
+            if response:
+                return response
+
         # Use Groq if configured
-        if self.use_groq and self.groq_client:
+        if self.groq_client:
             response = await self._call_groq(prompt, system_prompt, json_mode=json_mode)
             if response:
                 return response
@@ -110,7 +205,7 @@ class AIService:
         self,
         prompt: str,
         system_prompt: str,
-        attempts: int = 3,
+        attempts: int = 2,
         retry_delay_seconds: float = 0.8,
         json_mode: bool = False,
     ) -> str:
@@ -127,7 +222,11 @@ class AIService:
     @property
     def llm_available(self) -> bool:
         """Check whether at least one configured LLM client is available."""
-        return bool((self.use_groq and self.groq_client) or (self.use_ollama and self.ollama_url))
+        return bool(
+            (self.use_gemini and self.gemini_api_key) or
+            self.groq_client or
+            (self.use_ollama and self.ollama_url)
+        )
 
     def _extract_json_object(self, response: str) -> Optional[Dict[str, Any]]:
         parsed = extract_json_payload(response)
@@ -629,140 +728,74 @@ Original output:
 
         candidate_cases = self._shortlist_impact_candidates(selected_tickets, all_test_cases)
         candidate_sections = self._group_candidates_by_section(candidate_cases)
-        max_tickets = 12
-        max_sections = 12
-        max_tests_per_section = 6
-
-        tickets_summary = "\n".join([
-            f"- {t.get('issue_key', 'N/A')}: {t.get('summary', 'No summary')} "
-            f"(Type: {t.get('issue_type', 'N/A')}, Priority: {t.get('priority', 'N/A')}, Status: {t.get('status', 'N/A')})"
-            for t in selected_tickets[:max_tickets]
-        ])
-
-        sections_summary = "\n\n".join([
-            f"Section: {section} ({meta['count']} candidate tests)\n" + "\n".join([
-                f"  - {test['id']}: {test['title']} [priority={test['priority']}, match={test['match_reason']}, score={test['score']}]"
-                for test in meta['tests'][:max_tests_per_section]
-            ])
-            for section, meta in list(candidate_sections.items())[:max_sections]
-        ])
-
-        
-        prompt = f"""
-        You are an expert QA Manager analyzing release tickets to recommend regression test cases.
-        
-        SELECTED TICKETS FOR THIS RELEASE ({len(selected_tickets)} tickets):
-        {tickets_summary}
-        
-        AVAILABLE TEST CASES BY SECTION:
-        {sections_summary}
-
-        AI-SHORTLIST NOTES:
-        - Candidate tests were pre-filtered using direct ticket-key links, summary overlap, section relevance, and priority weighting.
-        - Prefer recommendations from these candidate sections/tests unless a strong release-risk reason suggests otherwise.
-        
-        YOUR TASK:
-        1. Analyze which modules/features are impacted by these tickets
-        2. Identify test case sections that should be regression tested
-        3. Recommend specific test case IDs that should be included for thorough testing
-        4. Explain WHY each section/test case is recommended (impact, risk, dependencies)
-        5. Identify which selected tickets are driving the most regression risk
-        6. State how confident you are in the recommendation quality based on the available test coverage
-        
-        Return ONLY valid JSON in this exact format:
-        {{
-            "impacted_areas": ["Module/Area 1", "Module/Area 2"],
-            "top_risk_tickets": ["TICKET-123", "TICKET-456"],
-            "recommended_sections": [
-                {{
-                    "section": "Section Name",
-                    "risk_level": "high|medium|low",
-                    "reason": "Why this section is impacted",
-                    "recommended_test_ids": ["C123", "C456"]
-                }}
-            ],
-            "additional_test_ids": ["C789", "C012"],
-            "overall_risk": "high|medium|low",
-            "confidence": "high|medium|low",
-            "summary": "Brief summary of testing strategy"
-        }}
-        """
         
         if not self.llm_available:
             raise ActualAIRequiredError(
-                "Step 1 impact analysis requires a configured AI model. Configure Ollama or Groq and try again."
+                "Step 1 impact analysis requires a configured AI model. Configure Gemini, Groq, or Ollama and try again."
             )
 
-        response = await self._generate_with_retries(
-            prompt,
-            "You are an expert QA Manager with deep knowledge of regression testing strategy. Return only valid JSON."
-            ,
-            json_mode=True,
-        )
-
-        result = self._extract_json_object(response)
-        if not result:
-            result = await self._repair_json_object(
-                response,
-                """
-{
-  "impacted_areas": ["Module/Area 1", "Module/Area 2"],
-  "top_risk_tickets": ["TICKET-123", "TICKET-456"],
-  "recommended_sections": [
-    {
-      "section": "Section Name",
-      "risk_level": "high|medium|low",
-      "reason": "Why this section is impacted",
-      "recommended_test_ids": ["C123", "C456"]
-    }
-  ],
-  "additional_test_ids": ["C789", "C012"],
-  "overall_risk": "high|medium|low",
-  "confidence": "high|medium|low",
-  "summary": "Brief summary of testing strategy"
-}
-                """.strip(),
-                "step 1 impact analysis output",
+        if self.use_gemini and self.gemini_api_key:
+            overview_result = await self._analyze_release_overview(selected_tickets, candidate_sections)
+            section_results = await self._analyze_candidate_sections_parallel(selected_tickets, candidate_sections)
+        else:
+            overview_result, section_results = await asyncio.gather(
+                self._analyze_release_overview(selected_tickets, candidate_sections),
+                self._analyze_candidate_sections_parallel(selected_tickets, candidate_sections),
             )
-        if not result:
-            response = await self._generate_with_retries(
-                prompt,
-                "You are an expert QA Manager with deep knowledge of regression testing strategy. Return only valid JSON.",
-                json_mode=True,
-            )
-            result = self._extract_json_object(response)
-            if not result:
-                result = await self._repair_json_object(
-                    response,
-                    """
-{
-  "impacted_areas": ["Module/Area 1", "Module/Area 2"],
-  "top_risk_tickets": ["TICKET-123", "TICKET-456"],
-  "recommended_sections": [
-    {
-      "section": "Section Name",
-      "risk_level": "high|medium|low",
-      "reason": "Why this section is impacted",
-      "recommended_test_ids": ["C123", "C456"]
-    }
-  ],
-  "additional_test_ids": ["C789", "C012"],
-  "overall_risk": "high|medium|low",
-  "confidence": "high|medium|low",
-  "summary": "Brief summary of testing strategy"
-}
-                    """.strip(),
-                    "step 1 impact analysis output",
-                )
 
-        if not result:
+        if not overview_result or not section_results:
             raise ActualAIRequiredError(
                 "Step 1 impact analysis did not receive valid AI JSON output. No heuristic fallback is allowed for this workflow."
             )
 
-        result["analysis_mode"] = "ai"
-        result["candidate_sections_considered"] = len(candidate_sections)
-        return result
+        valid_candidate_ids = {
+            test["id"]
+            for meta in candidate_sections.values()
+            for test in meta["tests"]
+        }
+        recommended_sections = []
+        additional_test_ids: List[str] = []
+        for section_result in section_results:
+            recommended_ids = [
+                test_id for test_id in section_result.get("recommended_test_ids", [])
+                if test_id in valid_candidate_ids
+            ]
+            extra_ids = [
+                test_id for test_id in section_result.get("additional_test_ids", [])
+                if test_id in valid_candidate_ids and test_id not in recommended_ids
+            ]
+            if not recommended_ids:
+                continue
+            recommended_sections.append({
+                "section": section_result.get("section"),
+                "risk_level": section_result.get("risk_level", "medium"),
+                "reason": section_result.get("reason", "AI-selected based on release impact."),
+                "recommended_test_ids": recommended_ids[:4],
+            })
+            additional_test_ids.extend(extra_ids[:2])
+
+        if not recommended_sections:
+            raise ActualAIRequiredError(
+                "Step 1 impact analysis returned section responses, but none included valid candidate test IDs."
+            )
+
+        return {
+            "impacted_areas": overview_result.get("impacted_areas", []),
+            "top_risk_tickets": overview_result.get("top_risk_tickets", []),
+            "recommended_sections": recommended_sections,
+            "additional_test_ids": list(dict.fromkeys(additional_test_ids))[:8],
+            "overall_risk": overview_result.get("overall_risk", "medium"),
+            "confidence": overview_result.get("confidence", "medium"),
+            "summary": overview_result.get("summary", "AI analysis completed using parallel section review."),
+            "analysis_mode": "ai",
+            "candidate_sections_considered": len(candidate_sections),
+            "parallel_section_tasks": len(section_results),
+            "parallel_section_limit": (
+                STEP1_GEMINI_SECTION_CONCURRENCY
+                if self.use_gemini and self.gemini_api_key
+                else STEP1_SECTION_CONCURRENCY
+            ),
+        }
 
     def _get_test_case_field(self, test_case: Dict[str, Any], *keys: str, default: str = "") -> str:
         for key in keys:
@@ -883,6 +916,206 @@ Original output:
                 "summary overlap, and test priority."
             ),
         }
+
+    async def _run_json_task(
+        self,
+        prompt: str,
+        system_prompt: str,
+        schema_hint: str,
+        timeout_seconds: float,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            response = await asyncio.wait_for(
+                self._generate_with_retries(
+                    prompt,
+                    system_prompt,
+                    json_mode=True,
+                ),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return None
+
+        result = self._extract_json_object(response)
+        if result:
+            return result
+
+        try:
+            repaired = await asyncio.wait_for(
+                self._repair_json_object(
+                    response,
+                    schema_hint,
+                    "step 1 impact analysis output",
+                ),
+                timeout=timeout_seconds,
+            )
+            if repaired:
+                return repaired
+        except asyncio.TimeoutError:
+            return None
+
+        try:
+            fallback_response = await asyncio.wait_for(
+                self._generate_with_retries(
+                    prompt,
+                    system_prompt,
+                    json_mode=False,
+                ),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return None
+
+        fallback_result = self._extract_json_object(fallback_response)
+        if fallback_result:
+            return fallback_result
+
+        try:
+            repaired = await asyncio.wait_for(
+                self._repair_json_object(
+                    fallback_response,
+                    schema_hint,
+                    "step 1 impact analysis output",
+                ),
+                timeout=timeout_seconds,
+            )
+            if repaired:
+                return repaired
+        except asyncio.TimeoutError:
+            return None
+
+        if self._last_provider_issue == "gemini_rate_limited" and not self.groq_client:
+            raise ActualAIRequiredError(
+                "Gemini is currently rate limited for Step 1. Wait a minute and retry, or configure Groq as a fallback provider."
+            )
+
+        return None
+
+    async def _analyze_release_overview(
+        self,
+        selected_tickets: List[Dict[str, Any]],
+        candidate_sections: Dict[str, Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        tickets_summary = "\n".join([
+            f"- {t.get('issue_key', 'N/A')}: {t.get('summary', 'No summary')} "
+            f"(Type: {t.get('issue_type', 'N/A')}, Priority: {t.get('priority', 'N/A')}, Status: {t.get('status', 'N/A')})"
+            for t in selected_tickets[:8]
+        ])
+        sections_summary = "\n".join([
+            f"- {section}: {meta['count']} candidate tests, strongest score {meta['max_score']}"
+            for section, meta in list(candidate_sections.items())[:6]
+        ])
+
+        prompt = f"""
+You are an expert QA Manager analyzing the overall regression risk for a release.
+
+SELECTED TICKETS:
+{tickets_summary}
+
+TOP CANDIDATE TEST SECTIONS:
+{sections_summary}
+
+Return ONLY valid JSON:
+{{
+  "impacted_areas": ["Module/Area 1", "Module/Area 2"],
+  "top_risk_tickets": ["TICKET-123", "TICKET-456"],
+  "overall_risk": "high|medium|low",
+  "confidence": "high|medium|low",
+  "summary": "Brief summary of testing strategy"
+}}
+"""
+
+        return await self._run_json_task(
+            prompt,
+            "You are an expert QA Manager focused on release-level regression risk. Return only valid JSON.",
+            """
+{
+  "impacted_areas": ["Module/Area 1", "Module/Area 2"],
+  "top_risk_tickets": ["TICKET-123", "TICKET-456"],
+  "overall_risk": "high|medium|low",
+  "confidence": "high|medium|low",
+  "summary": "Brief summary of testing strategy"
+}
+            """.strip(),
+            STEP1_OVERVIEW_TIMEOUT_SECONDS,
+        )
+
+    async def _analyze_candidate_section(
+        self,
+        section: str,
+        meta: Dict[str, Any],
+        selected_tickets: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        ticket_context = "\n".join([
+            f"- {ticket.get('issue_key', 'N/A')}: {ticket.get('summary', 'No summary')}"
+            for ticket in selected_tickets[:4]
+        ])
+        test_context = "\n".join([
+            f"- {test['id']}: {test['title']} [priority={test['priority']}, match={test['match_reason']}, score={test['score']}]"
+            for test in meta['tests'][:4]
+        ])
+
+        prompt = f"""
+You are an expert QA Manager reviewing one candidate regression section.
+
+SELECTED TICKETS:
+{ticket_context}
+
+SECTION UNDER REVIEW:
+- Section: {section}
+- Candidate tests: {meta['count']}
+- Strongest score: {meta['max_score']}
+
+TOP TESTS:
+{test_context}
+
+Return ONLY valid JSON:
+{{
+  "section": "{section}",
+  "risk_level": "high|medium|low",
+  "reason": "Why this section is impacted",
+  "recommended_test_ids": ["C123", "C456"],
+  "additional_test_ids": ["C789"]
+}}
+"""
+
+        return await self._run_json_task(
+            prompt,
+            "You are an expert QA Manager selecting the highest-value tests for one impacted section. Return only valid JSON.",
+            """
+{
+  "section": "Section Name",
+  "risk_level": "high|medium|low",
+  "reason": "Why this section is impacted",
+  "recommended_test_ids": ["C123", "C456"],
+  "additional_test_ids": ["C789"]
+}
+            """.strip(),
+            STEP1_SECTION_TIMEOUT_SECONDS,
+        )
+
+    async def _analyze_candidate_sections_parallel(
+        self,
+        selected_tickets: List[Dict[str, Any]],
+        candidate_sections: Dict[str, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        max_parallel_tasks = (
+            STEP1_GEMINI_SECTION_CONCURRENCY
+            if self.use_gemini and self.gemini_api_key
+            else STEP1_SECTION_CONCURRENCY
+        )
+        semaphore = asyncio.Semaphore(max_parallel_tasks)
+
+        async def run(section: str, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            async with semaphore:
+                return await self._analyze_candidate_section(section, meta, selected_tickets)
+
+        tasks = [
+            run(section, meta)
+            for section, meta in list(candidate_sections.items())[:6]
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [result for result in results if isinstance(result, dict)]
     
     async def generate_test_plan(
         self,

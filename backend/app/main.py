@@ -42,14 +42,35 @@ def startup_tasks():
 
 @app.get("/")
 def root():
-    ai_backend = "Groq" if settings.USE_GROQ and settings.GROQ_API_KEY else "Ollama"
+    gemini_ready = bool(settings.GEMINI_API_KEY)
+    groq_ready = bool(settings.GROQ_API_KEY and settings.GROQ_API_KEY != "your_groq_api_key_here")
+    ollama_ready = bool(settings.OLLAMA_BASE_URL)
+
+    if settings.USE_GEMINI and gemini_ready:
+        ai_backend = "Gemini"
+        ai_model = settings.GEMINI_MODEL
+        fallback_provider = "Groq" if groq_ready else ("Ollama" if ollama_ready else None)
+    elif groq_ready:
+        ai_backend = "Groq"
+        ai_model = settings.GROQ_MODEL
+        fallback_provider = "Ollama" if ollama_ready else None
+    else:
+        ai_backend = "Ollama"
+        ai_model = settings.OLLAMA_MODEL
+        fallback_provider = None
     jira_source = "live_jira_api" if google_sheets_service.is_live_api_enabled() else "csv_fallback"
     return {
         "app": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "status": "running",
         "ai_backend": ai_backend,
-        "ai_model": settings.GROQ_MODEL if ai_backend == "Groq" else settings.OLLAMA_MODEL,
+        "ai_model": ai_model,
+        "ai_routing": {
+            "primary_provider": ai_backend,
+            "primary_model": ai_model,
+            "fallback_provider": fallback_provider,
+            "fallback_ready": bool(fallback_provider),
+        },
         "data_sources": {
             "jira": jira_source,
             "testrail_csv": "testrail_testcases.csv"

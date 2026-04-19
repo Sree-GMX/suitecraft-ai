@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { startTransition, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   Box,
@@ -35,6 +35,7 @@ interface WorkflowState {
   selectedTickets: any[];
   selectedTestCases: any[];
   generatedTestPlan: any;
+  strategyScopeSignature: string | null;
   teamAssignments: any;
   testProgress: any;
 }
@@ -50,6 +51,7 @@ const DEFAULT_WORKFLOW_STATE: WorkflowState = {
   selectedTickets: EMPTY_ITEMS,
   selectedTestCases: EMPTY_ITEMS,
   generatedTestPlan: null,
+  strategyScopeSignature: null,
   teamAssignments: null,
   testProgress: null,
 };
@@ -72,9 +74,21 @@ function haveSameIds(previousItems: any[], nextItems: any[]) {
 function normalizeWorkflowState(state: WorkflowState): WorkflowState {
   const hasScopedTickets = state.selectedTickets.length > 0;
   const hasGeneratedPlan = Boolean(state.generatedTestPlan);
+  const derivedScopeSignature = hasScopedTickets
+    ? buildScopeSignature(state.selectedTickets, state.selectedTestCases)
+    : null;
+  const strategyScopeSignature = hasGeneratedPlan
+    ? (state.strategyScopeSignature || derivedScopeSignature)
+    : null;
+  const generatedPlanMatchesScope = Boolean(
+    hasGeneratedPlan &&
+    hasScopedTickets &&
+    strategyScopeSignature &&
+    strategyScopeSignature === derivedScopeSignature
+  );
 
   const step1Complete = hasScopedTickets;
-  const step2Complete = step1Complete && hasGeneratedPlan && state.step2Complete;
+  const step2Complete = step1Complete && hasGeneratedPlan && (state.step2Complete || generatedPlanMatchesScope);
   const step3Complete = step2Complete && state.step3Complete;
   const step4Complete = step3Complete && state.step4Complete;
 
@@ -91,7 +105,8 @@ function normalizeWorkflowState(state: WorkflowState): WorkflowState {
     step3Complete,
     step4Complete,
     selectedTestCases: hasScopedTickets ? state.selectedTestCases : EMPTY_ITEMS,
-    generatedTestPlan: step2Complete ? state.generatedTestPlan : null,
+    generatedTestPlan: generatedPlanMatchesScope ? state.generatedTestPlan : null,
+    strategyScopeSignature: step2Complete ? strategyScopeSignature : null,
     teamAssignments: step3Complete ? state.teamAssignments : null,
     testProgress: step4Complete ? state.testProgress : null,
   };
@@ -107,9 +122,33 @@ function isSameWorkflowState(previous: WorkflowState, next: WorkflowState) {
     haveSameIds(previous.selectedTickets, next.selectedTickets) &&
     haveSameIds(previous.selectedTestCases, next.selectedTestCases) &&
     previous.generatedTestPlan === next.generatedTestPlan &&
+    previous.strategyScopeSignature === next.strategyScopeSignature &&
     previous.teamAssignments === next.teamAssignments &&
     previous.testProgress === next.testProgress
   );
+}
+
+function buildScopeSignature(tickets: any[], testCases: any[]) {
+  const ticketIds = tickets
+    .map((ticket, index) => getComparableId(ticket, `ticket-${index}`))
+    .filter(Boolean)
+    .sort()
+    .join('|');
+  const testCaseIds = testCases
+    .map((testCase, index) => getComparableId(testCase, `test-${index}`))
+    .filter(Boolean)
+    .sort()
+    .join('|');
+
+  return `${ticketIds}::${testCaseIds}`;
+}
+
+function buildPlanCacheKey(releaseId: string | undefined, scopeSignature: string) {
+  return `workflow_plan_${releaseId}_${scopeSignature}`;
+}
+
+function buildApprovedPlanCacheKey(releaseId: string | undefined, scopeSignature: string) {
+  return `workflow_approved_plan_${releaseId}_${scopeSignature}`;
 }
 
 const STEP_COPY = {
@@ -138,7 +177,15 @@ const STEP_COPY = {
 export default function UnifiedReleaseWorkflow() {
   const { releaseId } = useParams<{ releaseId: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const lastPersistedStateRef = useRef<string>('');
+  const persistWorkflowStateImmediately = useCallback((nextState: WorkflowState) => {
+    const normalizedState = normalizeWorkflowState(nextState);
+    const serializedState = JSON.stringify(normalizedState);
+    localStorage.setItem(`workflow_${releaseId}`, serializedState);
+    lastPersistedStateRef.current = serializedState;
+    return normalizedState;
+  }, [releaseId]);
   const navigateToRelease = () => {
     if (!releaseId) {
       window.location.assign('/releases');
@@ -161,12 +208,92 @@ export default function UnifiedReleaseWorkflow() {
   });
 
   const normalizedWorkflowState = useMemo(() => normalizeWorkflowState(workflowState), [workflowState]);
+  const currentScopeSignature = useMemo(
+    () => buildScopeSignature(normalizedWorkflowState.selectedTickets, normalizedWorkflowState.selectedTestCases),
+    [normalizedWorkflowState.selectedTestCases, normalizedWorkflowState.selectedTickets]
+  );
 
   useEffect(() => {
     if (!isSameWorkflowState(workflowState, normalizedWorkflowState)) {
       setWorkflowState(normalizedWorkflowState);
     }
   }, [workflowState, normalizedWorkflowState]);
+
+  useEffect(() => {
+    if (!releaseId) {
+      return;
+    }
+
+    if (
+      !normalizedWorkflowState.step1Complete ||
+      normalizedWorkflowState.generatedTestPlan ||
+      !currentScopeSignature
+    ) {
+      return;
+    }
+
+    const cachedPlan = localStorage.getItem(buildPlanCacheKey(releaseId, currentScopeSignature));
+    if (!cachedPlan) {
+      return;
+    }
+
+    try {
+      const parsedPlan = JSON.parse(cachedPlan);
+      setWorkflowState((prev) => ({
+        ...prev,
+        step2Complete: true,
+        step3Complete: Boolean(parsedPlan?.approval_metadata?.approved_at),
+        generatedTestPlan: parsedPlan,
+        strategyScopeSignature: currentScopeSignature,
+      }));
+    } catch {
+      localStorage.removeItem(buildPlanCacheKey(releaseId, currentScopeSignature));
+    }
+  }, [
+    currentScopeSignature,
+    normalizedWorkflowState.generatedTestPlan,
+    normalizedWorkflowState.step1Complete,
+    releaseId,
+  ]);
+
+  useEffect(() => {
+    if (!releaseId) {
+      return;
+    }
+
+    if (
+      !normalizedWorkflowState.step1Complete ||
+      normalizedWorkflowState.step3Complete ||
+      normalizedWorkflowState.generatedTestPlan?.approval_metadata?.approved_at !== undefined ||
+      !currentScopeSignature
+    ) {
+      return;
+    }
+
+    const cachedApprovedPlan = localStorage.getItem(buildApprovedPlanCacheKey(releaseId, currentScopeSignature));
+    if (!cachedApprovedPlan) {
+      return;
+    }
+
+    try {
+      const parsedApprovedPlan = JSON.parse(cachedApprovedPlan);
+      setWorkflowState((prev) => ({
+        ...prev,
+        step2Complete: true,
+        step3Complete: true,
+        generatedTestPlan: parsedApprovedPlan,
+        strategyScopeSignature: currentScopeSignature,
+      }));
+    } catch {
+      localStorage.removeItem(buildApprovedPlanCacheKey(releaseId, currentScopeSignature));
+    }
+  }, [
+    currentScopeSignature,
+    normalizedWorkflowState.generatedTestPlan,
+    normalizedWorkflowState.step1Complete,
+    normalizedWorkflowState.step3Complete,
+    releaseId,
+  ]);
 
   const { data: release, isLoading } = useQuery({
     queryKey: ['release', releaseId],
@@ -192,14 +319,24 @@ export default function UnifiedReleaseWorkflow() {
 
   const isReadOnly = permissions ? (!permissions.can_edit && !permissions.is_owner) : false;
 
+  const requestedStep = useMemo(() => {
+    const parsedStep = Number(searchParams.get('step'));
+    return parsedStep >= 1 && parsedStep <= 4 ? (parsedStep as 1 | 2 | 3 | 4) : null;
+  }, [searchParams]);
+
   useEffect(() => {
     const serializedState = JSON.stringify(normalizedWorkflowState);
     if (lastPersistedStateRef.current === serializedState) {
       return;
     }
 
-    localStorage.setItem(`workflow_${releaseId}`, serializedState);
-    lastPersistedStateRef.current = serializedState;
+    const persistState = () => {
+      localStorage.setItem(`workflow_${releaseId}`, serializedState);
+      lastPersistedStateRef.current = serializedState;
+    };
+
+    const timeoutId = window.setTimeout(persistState, 150);
+    return () => window.clearTimeout(timeoutId);
   }, [normalizedWorkflowState, releaseId]);
 
   const progress = useMemo(() => {
@@ -224,6 +361,36 @@ export default function UnifiedReleaseWorkflow() {
     setWorkflowState((prev) => ({ ...prev, currentStep: step }));
   }, [normalizedWorkflowState.step1Complete, normalizedWorkflowState.step2Complete, normalizedWorkflowState.step3Complete]);
 
+  useEffect(() => {
+    if (!requestedStep || requestedStep === normalizedWorkflowState.currentStep) {
+      return;
+    }
+
+    if (requestedStep > 1 && !normalizedWorkflowState.step1Complete) {
+      return;
+    }
+    if (requestedStep > 2 && !normalizedWorkflowState.step2Complete) {
+      return;
+    }
+    if (requestedStep > 3 && !normalizedWorkflowState.step3Complete) {
+      return;
+    }
+
+    setWorkflowState((prev) => ({ ...prev, currentStep: requestedStep }));
+    setSearchParams((previousParams) => {
+      const nextParams = new URLSearchParams(previousParams);
+      nextParams.delete('step');
+      return nextParams;
+    }, { replace: true });
+  }, [
+    normalizedWorkflowState.currentStep,
+    normalizedWorkflowState.step1Complete,
+    normalizedWorkflowState.step2Complete,
+    normalizedWorkflowState.step3Complete,
+    requestedStep,
+    setSearchParams,
+  ]);
+
   const nextStep = () => {
     if (normalizedWorkflowState.currentStep < 4) {
       setWorkflowState((prev) => ({
@@ -243,36 +410,57 @@ export default function UnifiedReleaseWorkflow() {
   };
 
   const handleStep1Complete = useCallback((data: { tickets: any[]; testCases: any[] }) => {
-    setWorkflowState((prev) => {
-      const scopeChanged = !haveSameIds(prev.selectedTickets, data.tickets) || !haveSameIds(prev.selectedTestCases, data.testCases);
-      const nextStep1Complete = data.tickets.length > 0;
+    startTransition(() => {
+      setWorkflowState((prev) => {
+        const nextScopeSignature = buildScopeSignature(data.tickets, data.testCases);
+        const previousScopeSignature = prev.strategyScopeSignature || buildScopeSignature(prev.selectedTickets, prev.selectedTestCases);
+        const existingStrategyStillValid =
+          Boolean(prev.generatedTestPlan) &&
+          previousScopeSignature === nextScopeSignature;
+        const scopeChanged =
+          !existingStrategyStillValid &&
+          (
+            !haveSameIds(prev.selectedTickets, data.tickets) ||
+            !haveSameIds(prev.selectedTestCases, data.testCases)
+          );
+        const nextStep1Complete = data.tickets.length > 0;
 
-      if (
-        !scopeChanged &&
-        prev.step1Complete === nextStep1Complete &&
-        haveSameIds(prev.selectedTickets, data.tickets) &&
-        haveSameIds(prev.selectedTestCases, data.testCases)
-      ) {
-        return prev;
-      }
+        if (
+          !scopeChanged &&
+          prev.step1Complete === nextStep1Complete &&
+          haveSameIds(prev.selectedTickets, data.tickets) &&
+          haveSameIds(prev.selectedTestCases, data.testCases)
+        ) {
+          return prev;
+        }
 
-      return {
-        ...prev,
-        currentStep: data.tickets.length === 0 ? 1 : prev.currentStep,
-        step1Complete: nextStep1Complete,
-        step2Complete: scopeChanged ? false : prev.step2Complete,
-        step3Complete: scopeChanged ? false : prev.step3Complete,
-        step4Complete: scopeChanged ? false : prev.step4Complete,
-        selectedTickets: data.tickets,
-        selectedTestCases: data.testCases,
-        generatedTestPlan: scopeChanged ? null : prev.generatedTestPlan,
-        teamAssignments: scopeChanged ? null : prev.teamAssignments,
-        testProgress: scopeChanged ? null : prev.testProgress,
-      };
+        return {
+          ...prev,
+          currentStep: data.tickets.length === 0 ? 1 : prev.currentStep,
+          step1Complete: nextStep1Complete,
+          step2Complete: scopeChanged ? false : prev.step2Complete,
+          step3Complete: scopeChanged ? false : prev.step3Complete,
+          step4Complete: scopeChanged ? false : prev.step4Complete,
+          selectedTickets: data.tickets,
+          selectedTestCases: data.testCases,
+          generatedTestPlan: scopeChanged ? null : prev.generatedTestPlan,
+          strategyScopeSignature: scopeChanged
+            ? null
+            : existingStrategyStillValid
+              ? nextScopeSignature
+              : previousScopeSignature,
+          teamAssignments: scopeChanged ? null : prev.teamAssignments,
+          testProgress: scopeChanged ? null : prev.testProgress,
+        };
+      });
     });
   }, []);
 
   const handleStep2Complete = useCallback((testPlan: any) => {
+    const currentScopeSignature = buildScopeSignature(
+      normalizedWorkflowState.selectedTickets,
+      normalizedWorkflowState.selectedTestCases
+    );
     const newScenarios = (testPlan.new_test_scenarios || testPlan.test_scenarios || []).map((scenario: any, index: number) => ({
       id: index + 1,
       test_case_id: scenario.id || `TS-${String(index + 1).padStart(3, '0')}`,
@@ -315,28 +503,53 @@ export default function UnifiedReleaseWorkflow() {
       },
     };
 
-    setWorkflowState((prev) => ({
-      ...prev,
-      step2Complete: true,
-      generatedTestPlan: transformedTestPlan,
-    }));
-  }, []);
+    setWorkflowState((prev) =>
+      persistWorkflowStateImmediately({
+        ...prev,
+        step2Complete: true,
+        generatedTestPlan: transformedTestPlan,
+        strategyScopeSignature: currentScopeSignature,
+      })
+    );
+    if (releaseId) {
+      localStorage.setItem(
+        buildPlanCacheKey(releaseId, currentScopeSignature),
+        JSON.stringify(transformedTestPlan)
+      );
+    }
+  }, [normalizedWorkflowState.selectedTestCases, normalizedWorkflowState.selectedTickets, persistWorkflowStateImmediately]);
 
   const handleStep3Complete = useCallback((approvedTestPlan: any) => {
-    setWorkflowState((prev) => ({
-      ...prev,
-      step3Complete: true,
-      generatedTestPlan: approvedTestPlan,
-    }));
-  }, []);
+    const currentApprovedScopeSignature = buildScopeSignature(
+      normalizedWorkflowState.selectedTickets,
+      normalizedWorkflowState.selectedTestCases
+    );
+    setWorkflowState((prev) =>
+      persistWorkflowStateImmediately({
+        ...prev,
+        step2Complete: true,
+        step3Complete: true,
+        generatedTestPlan: approvedTestPlan,
+        strategyScopeSignature: currentApprovedScopeSignature,
+      })
+    );
+    if (releaseId) {
+      localStorage.setItem(
+        buildApprovedPlanCacheKey(releaseId, currentApprovedScopeSignature),
+        JSON.stringify(approvedTestPlan)
+      );
+    }
+  }, [normalizedWorkflowState.selectedTestCases, normalizedWorkflowState.selectedTickets, persistWorkflowStateImmediately, releaseId]);
 
   const handleStep4Complete = useCallback(() => {
-    setWorkflowState((prev) => ({
-      ...prev,
-      step4Complete: true,
-    }));
+    setWorkflowState((prev) =>
+      persistWorkflowStateImmediately({
+        ...prev,
+        step4Complete: true,
+      })
+    );
     navigateToRelease();
-  }, [navigateToRelease]);
+  }, [navigateToRelease, persistWorkflowStateImmediately]);
 
   const canProceedToNext = () => {
     switch (normalizedWorkflowState.currentStep) {

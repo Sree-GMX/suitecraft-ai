@@ -32,9 +32,9 @@ export const SUITECRAFT_TOKENS = {
       glassHover: 'rgba(255, 255, 255, 0.56)',
       overlay: 'rgba(244, 249, 249, 0.82)',
       platformGradient:
-        'radial-gradient(circle at 50% 14%, rgba(138, 201, 214, 0.16) 0%, rgba(226, 239, 242, 0.74) 34%, rgba(242, 247, 246, 0.92) 68%, rgba(236, 243, 240, 1) 100%), linear-gradient(135deg, #eaf4f6 0%, #f7fbfb 46%, #edf5f2 100%)',
+        'radial-gradient(circle at 12% 18%, rgba(255, 96, 156, 0.13) 0%, rgba(255, 96, 156, 0.04) 15%, transparent 34%), radial-gradient(circle at 86% 14%, rgba(255, 166, 77, 0.12) 0%, rgba(255, 166, 77, 0.04) 15%, transparent 36%), radial-gradient(circle at 28% 78%, rgba(56, 213, 219, 0.10) 0%, rgba(56, 213, 219, 0.035) 14%, transparent 30%), radial-gradient(circle at 76% 72%, rgba(138, 92, 246, 0.08) 0%, rgba(138, 92, 246, 0.03) 14%, transparent 30%), radial-gradient(circle at 50% 12%, rgba(255,255,255,0.84) 0%, rgba(255,255,255,0.36) 28%, transparent 50%), linear-gradient(145deg, #fffaf8 0%, #fffdf7 24%, #fbfeff 50%, #fdfbff 74%, #f8fcf9 100%)',
       authGradient:
-        'radial-gradient(circle at 50% 15%, rgba(145, 207, 216, 0.16) 0%, rgba(228, 240, 243, 0.76) 34%, rgba(243, 248, 247, 0.94) 70%, rgba(238, 244, 242, 1) 100%), linear-gradient(135deg, #ebf5f6 0%, #f8fbfb 46%, #eef5f2 100%)',
+        'radial-gradient(circle at 14% 16%, rgba(255, 96, 156, 0.10) 0%, rgba(255, 96, 156, 0.03) 15%, transparent 32%), radial-gradient(circle at 84% 16%, rgba(255, 166, 77, 0.10) 0%, rgba(255, 166, 77, 0.03) 15%, transparent 34%), radial-gradient(circle at 28% 74%, rgba(56, 213, 219, 0.08) 0%, rgba(56, 213, 219, 0.03) 14%, transparent 28%), radial-gradient(circle at 76% 74%, rgba(138, 92, 246, 0.06) 0%, rgba(138, 92, 246, 0.025) 14%, transparent 28%), radial-gradient(circle at 50% 10%, rgba(255,255,255,0.82) 0%, rgba(255,255,255,0.34) 28%, transparent 50%), linear-gradient(145deg, #fffbf8 0%, #fffdf8 24%, #fbfeff 50%, #fefcff 74%, #f8fcfa 100%)',
     },
 
     status: {
@@ -350,26 +350,16 @@ export const SUITECRAFT_GLOBAL_STYLES = `
     pointer-events: none;
     z-index: 0;
     background:
-      radial-gradient(circle at 18% 24%, rgba(152, 210, 220, 0.18) 0%, transparent 26%),
-      radial-gradient(circle at 82% 22%, rgba(255,255,255,0.72) 0%, transparent 24%),
-      radial-gradient(circle at 52% 78%, rgba(196, 222, 220, 0.18) 0%, transparent 28%),
-      linear-gradient(180deg, rgba(255,255,255,0.24) 0%, rgba(255,255,255,0) 22%, rgba(255,255,255,0.16) 100%);
-    opacity: 0.9;
+      radial-gradient(circle at 12% 18%, rgba(255, 96, 156, 0.07) 0%, transparent 20%),
+      radial-gradient(circle at 88% 16%, rgba(255, 166, 77, 0.06) 0%, transparent 18%),
+      radial-gradient(circle at 22% 76%, rgba(56, 213, 219, 0.05) 0%, transparent 20%),
+      radial-gradient(circle at 78% 74%, rgba(138, 92, 246, 0.04) 0%, transparent 20%),
+      linear-gradient(180deg, rgba(255,255,255,0.24) 0%, rgba(255,255,255,0) 24%, rgba(255,255,255,0.18) 100%);
+    opacity: 1;
   }
 
   body::after {
-    content: '';
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 0;
-    background-image:
-      linear-gradient(rgba(255,255,255,0.14) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255,255,255,0.10) 1px, transparent 1px);
-    background-size: 32px 32px, 32px 32px;
-    mask-image: radial-gradient(circle at center, rgba(0,0,0,0.34), transparent 78%);
-    -webkit-mask-image: radial-gradient(circle at center, rgba(0,0,0,0.34), transparent 78%);
-    opacity: 0.22;
+    content: none;
   }
 
   #root {

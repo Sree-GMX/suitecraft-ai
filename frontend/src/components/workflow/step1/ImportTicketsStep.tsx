@@ -70,12 +70,17 @@ export default function ImportTicketsStep({
   const [aiAnalysis, setAiAnalysis] = useState<any>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isRefreshingData, setIsRefreshingData] = useState(false);
   const [ticketPage, setTicketPage] = useState(1);
   const [testCasePage, setTestCasePage] = useState(1);
   const lastCompletionSignature = useRef('');
-  const shouldLoadCsv = coverageMode !== 'recommended' || initialSelectedTestCases.length > 0 || includedTestCases.size > 0 || !!aiAnalysis;
 
-  const { data: ticketsData, isLoading: loadingTickets, refetch: refetchTickets } = useQuery({
+  const {
+    data: ticketsData,
+    isLoading: loadingTickets,
+    isFetching: fetchingTickets,
+    refetch: refetchTickets,
+  } = useQuery({
     queryKey: ['integration-tickets', releaseId, releaseVersion],
     queryFn: async () => {
       const response = await integrationService.getTicketsWithTestCases(
@@ -87,34 +92,20 @@ export default function ImportTicketsStep({
     refetchOnWindowFocus: false,
   });
 
-  const {
-    data: testCasesPages,
-    isLoading: loadingTestCases,
-    refetch: refetchTestCases,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useInfiniteQuery({
-    queryKey: ['testrail-csv-all-browse'],
-    initialPageParam: 0,
-    queryFn: async ({ pageParam }) => {
-      const response = await integrationService.getAllTestRailCSV(TEST_CASE_PAGE_SIZE, pageParam as number);
-      return response.data;
-    },
-    enabled: shouldLoadCsv,
-    refetchOnWindowFocus: false,
-    getNextPageParam: (lastPage, pages) => {
-      const loaded = pages.reduce((sum: number, page: any) => sum + (page.test_cases?.length || 0), 0);
-      return loaded < (lastPage.total || 0) ? loaded : undefined;
-    },
-  });
-
   const stories = ticketsData?.stories || [];
   const bugs = ticketsData?.bugs || [];
   const allTickets = useMemo(() => [...stories, ...bugs], [stories, bugs]);
   const selectedTicketList = useMemo(
     () => allTickets.filter((ticket: any) => selectedTickets.has(getTicketId(ticket))),
     [allTickets, selectedTickets]
+  );
+  const initialSelectedTicketIds = useMemo(
+    () => new Set((initialSelectedTickets || []).map((ticket) => getTicketId(ticket)).filter(Boolean)),
+    [initialSelectedTickets]
+  );
+  const initialSelectedTicketList = useMemo(
+    () => allTickets.filter((ticket: any) => initialSelectedTicketIds.has(getTicketId(ticket))),
+    [allTickets, initialSelectedTicketIds]
   );
   const ticketDataReady = Boolean(ticketsData) || !releaseVersion;
 
@@ -143,6 +134,59 @@ export default function ImportTicketsStep({
     });
     return Array.from(map.values());
   }, [selectedTicketList]);
+  const initialScopedLinkedTestCaseIds = useMemo(() => {
+    const ids = new Set<string>();
+    initialSelectedTicketList.forEach((ticket: any) => {
+      (ticket.test_cases || []).forEach((testCase: any) => {
+        const id = getTestCaseId(testCase);
+        if (id) {
+          ids.add(id);
+        }
+      });
+    });
+    return ids;
+  }, [initialSelectedTicketList]);
+
+  const scopedLinkedTestCaseIds = useMemo(
+    () => new Set(scopedLinkedTestCases.map((testCase: any) => getTestCaseId(testCase)).filter(Boolean)),
+    [scopedLinkedTestCases]
+  );
+  const initialSelectedTestCaseIds = useMemo(
+    () => new Set((initialSelectedTestCases || []).map((testCase) => getTestCaseId(testCase)).filter(Boolean)),
+    [initialSelectedTestCases]
+  );
+  const hasUnresolvedInitialSelections = useMemo(
+    () => Array.from(initialSelectedTestCaseIds).some((testCaseId) => !scopedLinkedTestCaseIds.has(testCaseId)),
+    [initialSelectedTestCaseIds, scopedLinkedTestCaseIds]
+  );
+  const shouldLoadCsv =
+    coverageMode !== 'recommended' ||
+    includedTestCases.size > 0 ||
+    !!aiAnalysis ||
+    hasUnresolvedInitialSelections;
+
+  const {
+    data: testCasesPages,
+    isLoading: loadingTestCases,
+    isFetching: fetchingTestCases,
+    refetch: refetchTestCases,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
+    queryKey: ['testrail-csv-all-browse'],
+    initialPageParam: 0,
+    queryFn: async ({ pageParam }) => {
+      const response = await integrationService.getAllTestRailCSV(TEST_CASE_PAGE_SIZE, pageParam as number);
+      return response.data;
+    },
+    enabled: shouldLoadCsv,
+    refetchOnWindowFocus: false,
+    getNextPageParam: (lastPage, pages) => {
+      const loaded = pages.reduce((sum: number, page: any) => sum + (page.test_cases?.length || 0), 0);
+      return loaded < (lastPage.total || 0) ? loaded : undefined;
+    },
+  });
 
   const allCsvTestCases = useMemo(
     () =>
@@ -153,10 +197,6 @@ export default function ImportTicketsStep({
   );
 
   const totalCsvTestCases = testCasesPages?.pages?.[0]?.total || allCsvTestCases.length;
-  const scopedLinkedTestCaseIds = useMemo(
-    () => new Set(scopedLinkedTestCases.map((testCase: any) => getTestCaseId(testCase)).filter(Boolean)),
-    [scopedLinkedTestCases]
-  );
 
   const testCaseLookup = useMemo(() => {
     const map = new Map<string, any>();
@@ -175,12 +215,12 @@ export default function ImportTicketsStep({
     const nextExcluded = new Set<string>();
 
     initialIds.forEach((testCaseId) => {
-      if (!scopedLinkedTestCaseIds.has(testCaseId)) {
+      if (!initialScopedLinkedTestCaseIds.has(testCaseId)) {
         nextIncluded.add(testCaseId);
       }
     });
 
-    scopedLinkedTestCaseIds.forEach((testCaseId) => {
+    initialScopedLinkedTestCaseIds.forEach((testCaseId) => {
       if (!initialIds.has(testCaseId)) {
         nextExcluded.add(testCaseId);
       }
@@ -192,7 +232,7 @@ export default function ImportTicketsStep({
     setExcludedLinkedTestCases((currentExcluded) =>
       areSetsEqual(currentExcluded, nextExcluded) ? currentExcluded : nextExcluded
     );
-  }, [initialSelectedTestCases, scopedLinkedTestCaseIds]);
+  }, [initialSelectedTestCases, initialScopedLinkedTestCaseIds]);
 
   const effectiveSelectedTestCaseIds = useMemo(() => {
     const ids = new Set<string>();
@@ -211,10 +251,6 @@ export default function ImportTicketsStep({
         .map((testCaseId) => testCaseLookup.get(testCaseId))
         .filter(Boolean),
     [effectiveSelectedTestCaseIds, testCaseLookup]
-  );
-  const initialSelectedTestCaseIds = useMemo(
-    () => new Set((initialSelectedTestCases || []).map((testCase) => getTestCaseId(testCase)).filter(Boolean)),
-    [initialSelectedTestCases]
   );
   const initialSelectionFullyResolved = useMemo(
     () =>
@@ -308,7 +344,15 @@ export default function ImportTicketsStep({
   }, [releaseVersion]);
 
   useEffect(() => {
-    setSelectedTickets(new Set((initialSelectedTickets || []).map((ticket) => getTicketId(ticket)).filter(Boolean)));
+    const nextSelectedTickets = new Set(
+      (initialSelectedTickets || []).map((ticket) => getTicketId(ticket)).filter(Boolean)
+    );
+
+    setSelectedTickets((currentSelectedTickets) =>
+      areSetsEqual(currentSelectedTickets, nextSelectedTickets)
+        ? currentSelectedTickets
+        : nextSelectedTickets
+    );
   }, [initialSelectedTickets]);
 
   useEffect(() => {
@@ -441,6 +485,18 @@ export default function ImportTicketsStep({
     handleToggleTestCase(testCaseId);
   }, [handleToggleTestCase]);
 
+  const handleRefreshData = useCallback(async () => {
+    setIsRefreshingData(true);
+    try {
+      await Promise.all([
+        refetchTickets(),
+        shouldLoadCsv ? refetchTestCases() : Promise.resolve(null),
+      ]);
+    } finally {
+      setIsRefreshingData(false);
+    }
+  }, [refetchTickets, refetchTestCases, shouldLoadCsv]);
+
   const runAiAnalysis = async () => {
     if (selectedTickets.size === 0) return;
     setIsAnalyzing(true);
@@ -517,12 +573,12 @@ export default function ImportTicketsStep({
     }
   }, [coverageMode, displayedTestCases.length, fetchNextPage, hasNextPage, isFetchingNextPage, testCasePage]);
 
-  if (loadingTickets || (shouldLoadCsv && loadingTestCases && allCsvTestCases.length === 0)) {
+  if (loadingTickets) {
     return (
       <Paper elevation={0} sx={{ p: 6, textAlign: 'center', borderRadius: 4, border: '1px solid rgba(255,255,255,0.58)', background: 'linear-gradient(180deg, rgba(255,255,255,0.36) 0%, rgba(245,250,251,0.16) 100%)', backdropFilter: 'blur(22px)', boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.76)' }}>
         <CircularProgress />
         <Typography sx={{ mt: 2 }} color="text.secondary">
-          {loadingTickets ? 'Preparing release scope and coverage context...' : 'Loading TestRail coverage only when this view needs it...'}
+          Preparing release scope and coverage context...
         </Typography>
       </Paper>
     );
@@ -556,14 +612,12 @@ export default function ImportTicketsStep({
               <Stack direction={{ xs: 'row', md: 'column' }} spacing={1.25} alignItems={{ xs: 'stretch', md: 'flex-end' }}>
               <Button
                 variant="outlined"
-                startIcon={<RefreshIcon />}
-                onClick={() => {
-                  refetchTickets();
-                  refetchTestCases();
-                }}
+                startIcon={isRefreshingData || fetchingTickets || fetchingTestCases ? <CircularProgress size={18} color="inherit" /> : <RefreshIcon />}
+                onClick={handleRefreshData}
+                disabled={isRefreshingData}
                 sx={{ textTransform: 'none', borderRadius: 999 }}
               >
-                Refresh Data
+                {isRefreshingData || fetchingTickets || fetchingTestCases ? 'Refreshing...' : 'Refresh Data'}
               </Button>
               </Stack>
             </Stack>
@@ -798,7 +852,6 @@ export default function ImportTicketsStep({
           borderRadius: 3,
           border: '1px solid rgba(255,255,255,0.54)',
           background: 'linear-gradient(135deg, rgba(255,255,255,0.30) 0%, rgba(255,255,255,0.14) 100%)',
-          backdropFilter: 'blur(20px)',
           boxShadow: '0 12px 28px rgba(15, 23, 42, 0.06), inset 0 1px 0 rgba(255,255,255,0.72)',
         }}
       >
@@ -823,7 +876,6 @@ export default function ImportTicketsStep({
               borderRadius: 3,
               bgcolor: readyToContinue ? 'rgba(236,253,245,0.72)' : 'rgba(255,247,237,0.76)',
               border: '1px solid rgba(255,255,255,0.44)',
-              backdropFilter: 'blur(16px)',
             }}
           >
             <Typography variant="caption" sx={{ display: 'block', color: '#64748B', fontWeight: 700, mb: 0.4 }}>
@@ -853,7 +905,6 @@ export default function ImportTicketsStep({
           borderRadius: 4,
           border: '1px solid rgba(255,255,255,0.54)',
           background: 'linear-gradient(135deg, rgba(255,255,255,0.34) 0%, rgba(255,255,255,0.16) 100%)',
-          backdropFilter: 'blur(22px)',
           boxShadow: '0 12px 26px rgba(15, 23, 42, 0.06), inset 0 1px 0 rgba(255,255,255,0.72)',
         }}
       >
@@ -919,9 +970,9 @@ export default function ImportTicketsStep({
                         border: '1px solid',
                         borderColor: selected ? `${SUITECRAFT_TOKENS.colors.primary}55` : 'rgba(148, 163, 184, 0.22)',
                         bgcolor: selected ? 'rgba(255, 88, 65, 0.08)' : 'rgba(255,255,255,0.34)',
-                        backdropFilter: 'blur(14px)',
                         cursor: isReadOnly ? 'default' : 'pointer',
-                        transition: 'all 0.2s ease',
+                        transition: 'border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease',
+                        transform: 'translateZ(0)',
                         '&:hover': isReadOnly
                           ? undefined
                           : {
@@ -1013,7 +1064,6 @@ export default function ImportTicketsStep({
           borderRadius: 4,
           border: '1px solid rgba(255,255,255,0.54)',
           background: 'linear-gradient(135deg, rgba(255,255,255,0.34) 0%, rgba(255,255,255,0.16) 100%)',
-          backdropFilter: 'blur(22px)',
           boxShadow: '0 12px 26px rgba(15, 23, 42, 0.06), inset 0 1px 0 rgba(255,255,255,0.72)',
         }}
       >
@@ -1083,6 +1133,12 @@ export default function ImportTicketsStep({
               }}
             />
 
+            {shouldLoadCsv && loadingTestCases && allCsvTestCases.length === 0 && coverageMode !== 'recommended' && (
+              <Alert severity="info" sx={{ borderRadius: 3 }}>
+                Loading TestRail coverage for this view...
+              </Alert>
+            )}
+
             <Stack spacing={1} sx={{ flex: 1 }}>
               {displayedTestCases.length === 0 ? (
                 <EmptyState
@@ -1112,9 +1168,9 @@ export default function ImportTicketsStep({
                         border: '1px solid',
                         borderColor: selected ? '#7C3AED55' : 'rgba(148, 163, 184, 0.22)',
                         bgcolor: selected ? 'rgba(124, 58, 237, 0.08)' : 'rgba(255,255,255,0.34)',
-                        backdropFilter: 'blur(14px)',
                         cursor: isReadOnly ? 'default' : 'pointer',
-                        transition: 'all 0.2s ease',
+                        transition: 'border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease',
+                        transform: 'translateZ(0)',
                       }}
                     >
                       <Stack spacing={0.9}>
@@ -1322,6 +1378,10 @@ async function retryAsync<T>(fn: () => Promise<T>, attempts: number, delayMs: nu
       return await fn();
     } catch (error) {
       lastError = error;
+      const statusCode = (error as any)?.response?.status;
+      if (statusCode === 503 || statusCode === 429) {
+        break;
+      }
       if (attempt < attempts - 1) {
         await new Promise((resolve) => window.setTimeout(resolve, delayMs));
       }
@@ -1341,7 +1401,7 @@ function SummaryCard({ icon, label, value, tone, bg }: { icon: React.ReactNode; 
         borderRadius: 3,
         bgcolor: bg,
         border: '1px solid rgba(255,255,255,0.42)',
-        backdropFilter: 'blur(16px)',
+        transform: 'translateZ(0)',
       }}
     >
       <Stack direction="row" spacing={1.25} alignItems="center" sx={{ height: '100%' }}>
@@ -1422,7 +1482,7 @@ function ScopeBriefingCard({
         borderRadius: 3.5,
         border: `1px solid ${colors.border}`,
         background: colors.bg,
-        backdropFilter: 'blur(16px)',
+        transform: 'translateZ(0)',
         boxShadow: '0 10px 24px rgba(15, 23, 42, 0.05)',
       }}
     >

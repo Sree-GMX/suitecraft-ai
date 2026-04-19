@@ -622,7 +622,7 @@ export default function GenerateTestsStep({
             <SummaryTile icon={<RiskIcon />} label="Release Risk" value={strategy.riskLabel} helper={strategy.riskNarrativeShort} tone={strategy.riskTone} />
             <SummaryTile icon={<ConfidenceIcon />} label="Coverage Confidence" value={strategy.coverageConfidence.label} helper={strategy.coverageConfidence.shortReason} tone={strategy.coverageConfidence.tone} />
             <SummaryTile icon={<EffortIcon />} label="Effort" value={strategy.effortLabel} helper={strategy.teamGuidanceShort} />
-            <SummaryTile icon={<SuiteIcon />} label="Execution Shape" value={`${strategy.totalTests} Tests`} helper={`${strategy.newScenarioCount} new scenarios + ${strategy.existingRegressionCount} existing regression tests`} />
+            <SummaryTile icon={<SuiteIcon />} label="Execution Shape" value={`${strategy.executionShapeCount} Tests`} helper={`${strategy.newScenarioCount} new scenarios + ${strategy.existingRegressionCount} existing regression tests`} />
           </Stack>
 
           <Paper
@@ -894,6 +894,10 @@ async function retryAsync<T>(fn: () => Promise<T>, attempts: number, delayMs: nu
       return await fn();
     } catch (error) {
       lastError = error;
+      const statusCode = (error as any)?.response?.status;
+      if (statusCode === 503 || statusCode === 429) {
+        break;
+      }
       if (attempt < attempts - 1) {
         await new Promise((resolve) => window.setTimeout(resolve, delayMs));
       }
@@ -923,6 +927,7 @@ function buildStrategyModel(testPlan: any, selectedTickets: any[], selectedTestC
   const riskTone = riskLevel === 'high' ? '#B91C1C' : riskLevel === 'low' ? '#0F766E' : '#B45309';
   const totalExistingTests = testSuites.reduce((sum: number, suite: any) => sum + (suite.test_cases?.length || 0), 0);
   const totalTests = coverageMetrics.total_test_cases || totalExistingTests;
+  const executionShapeCount = totalExistingTests + newScenarios.length;
   const topTicketLabels = selectedTickets.slice(0, 4).map(getTicketId).filter(Boolean);
   const storyCount = coverageMetrics.stories || selectedTickets.filter((ticket) => !isBugTicket(ticket)).length;
   const bugCount = coverageMetrics.bugs || selectedTickets.filter((ticket) => isBugTicket(ticket)).length;
@@ -991,6 +996,7 @@ function buildStrategyModel(testPlan: any, selectedTickets: any[], selectedTestC
     teamGuidance,
     teamGuidanceShort: teamSize ? `${teamSize} testers recommended` : 'Team sizing needs review',
     totalTests,
+    executionShapeCount,
     newScenarioCount: newScenarios.length,
     existingRegressionCount: totalExistingTests,
     newScenarios,
