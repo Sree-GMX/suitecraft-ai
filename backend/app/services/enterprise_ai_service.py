@@ -13,11 +13,13 @@ import hashlib
 from datetime import datetime
 import asyncio
 import logging
+import time
 
 STEP2_CONCURRENT_BATCHES = 3
 STEP2_GEMINI_CONCURRENT_BATCHES = 1
 STEP2_TASK_TIMEOUT_SECONDS = 25
 GEMINI_MAX_RETRIES = 2
+GEMINI_COOLDOWN_SECONDS = 15 * 60
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ class EnterpriseAIService:
         self.ollama_model = settings.OLLAMA_MODEL
         self._plan_cache: Dict[str, Dict[str, Any]] = {}
         self._last_provider_issue: Optional[str] = None
+        self._gemini_disabled_until: float = 0.0
         
         # Initialize Groq client if available
         self.groq_client = None
@@ -50,6 +53,34 @@ class EnterpriseAIService:
         self.gemini_api_key = getattr(settings, 'GEMINI_API_KEY', None)
         self.gemini_model = getattr(settings, 'GEMINI_MODEL', 'gemini-flash-latest')
 
+    def _provider_sequence(self) -> List[str]:
+        providers: List[str] = []
+        if self.use_gemini and self.gemini_api_key and not self._gemini_temporarily_disabled():
+            providers.append("gemini")
+        if self.groq_client:
+            providers.append("groq")
+        if self.use_ollama:
+            providers.append("ollama")
+        return providers
+
+    def _gemini_temporarily_disabled(self) -> bool:
+        return bool(self._gemini_disabled_until and time.monotonic() < self._gemini_disabled_until)
+
+    def _disable_gemini_temporarily(self) -> None:
+        self._gemini_disabled_until = time.monotonic() + GEMINI_COOLDOWN_SECONDS
+
+    def _gemini_issue_is_quota_or_rate_limit(self, status_code: int, response_text: str) -> bool:
+        text = (response_text or "").lower()
+        return status_code == 429 or any(
+            marker in text
+            for marker in [
+                "quota",
+                "rate limit",
+                "resource exhausted",
+                "too many requests",
+            ]
+        )
+
     async def _call_gemini(
         self,
         prompt: str,
@@ -58,7 +89,7 @@ class EnterpriseAIService:
         max_tokens: int = 4000,
         json_mode: bool = True,
     ) -> str:
-        if not self.gemini_api_key:
+        if not self.gemini_api_key or self._gemini_temporarily_disabled():
             return ""
 
         generation_config: Dict[str, Any] = {
@@ -81,14 +112,15 @@ class EnterpriseAIService:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 for attempt in range(GEMINI_MAX_RETRIES):
                     response = await client.post(url, json=payload)
-                    if response.status_code == 429:
+                    if self._gemini_issue_is_quota_or_rate_limit(response.status_code, response.text):
                         self._last_provider_issue = "gemini_rate_limited"
+                        self._disable_gemini_temporarily()
                         logger.warning(
                             "Gemini Step 2 request hit rate limits on attempt %s for model %s",
                             attempt + 1,
                             self.gemini_model,
                         )
-                        if attempt < GEMINI_MAX_RETRIES - 1:
+                        if attempt < GEMINI_MAX_RETRIES - 1 and not self.groq_client:
                             await asyncio.sleep(1.0 + attempt)
                             continue
                         return ""
@@ -121,63 +153,82 @@ class EnterpriseAIService:
         temperature: float = 0.1,
         max_tokens: int = 4000,
         json_mode: bool = True,
+        preferred_provider: Optional[str] = None,
+        skip_providers: Optional[List[str]] = None,
     ) -> str:
-        """Unified AI call method that tries Groq first, then Ollama"""
+        """Unified AI call method that tries configured providers in order."""
         self._last_provider_issue = None
-        if self.use_gemini and self.gemini_api_key:
-            result = await self._call_gemini(
-                prompt,
-                system_prompt,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                json_mode=json_mode,
-            )
-            if result:
-                return result
-        
-        # Try Groq first if configured
-        if self.groq_client:
-            try:
-                request_payload = {
-                    "model": settings.GROQ_MODEL,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                }
-                if json_mode:
-                    request_payload["response_format"] = {"type": "json_object"}
-                response = self.groq_client.chat.completions.create(**request_payload)
-                result = response.choices[0].message.content
-                return result
-            except Exception:
-                pass
+        providers = [preferred_provider] if preferred_provider else self._provider_sequence()
+        skipped = set(skip_providers or [])
 
-        # Fallback to Ollama
-        if not self.use_ollama:
-            return ""
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    f"{self.ollama_url}/api/generate",
-                    json={
-                        "model": self.ollama_model,
-                        "prompt": f"{system_prompt}\n\n{prompt}",
-                        "stream": False,
-                        "options": {
-                            "temperature": temperature,
-                            "num_predict": max_tokens
-                        }
-                    }
+        if not preferred_provider and self._gemini_temporarily_disabled():
+            skipped.add("gemini")
+
+        for provider in providers:
+            if not provider or provider in skipped:
+                continue
+
+            if provider == "gemini":
+                result = await self._call_gemini(
+                    prompt,
+                    system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=json_mode,
                 )
-                
-                if response.status_code == 200:
-                    result = response.json().get("response", "")
+                if result:
                     return result
-        except Exception:
-            pass
+                continue
+
+            if provider == "groq":
+                try:
+                    request_payload = {
+                        "model": settings.GROQ_MODEL,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                    }
+                    if json_mode:
+                        request_payload["response_format"] = {"type": "json_object"}
+                    response = self.groq_client.chat.completions.create(**request_payload)
+                    result = response.choices[0].message.content
+                    if result:
+                        return result
+                except Exception:
+                    self._last_provider_issue = "groq_exception"
+                continue
+
+            if provider != "ollama":
+                continue
+
+            if not self.use_ollama:
+                continue
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    response = await client.post(
+                        f"{self.ollama_url}/api/generate",
+                        json={
+                            "model": self.ollama_model,
+                            "prompt": f"{system_prompt}\n\n{prompt}",
+                            "stream": False,
+                            "options": {
+                                "temperature": temperature,
+                                "num_predict": max_tokens
+                            }
+                        }
+                    )
+                    
+                    if response.status_code == 200:
+                        result = response.json().get("response", "")
+                        if result:
+                            return result
+                    else:
+                        self._last_provider_issue = f"ollama_http_{response.status_code}"
+            except Exception:
+                self._last_provider_issue = "ollama_exception"
 
         return ""
 
@@ -190,6 +241,8 @@ class EnterpriseAIService:
         attempts: int = 2,
         retry_delay_seconds: float = 0.8,
         json_mode: bool = True,
+        preferred_provider: Optional[str] = None,
+        skip_providers: Optional[List[str]] = None,
     ) -> str:
         last_response = ""
         for attempt in range(attempts):
@@ -199,10 +252,16 @@ class EnterpriseAIService:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=json_mode,
+                preferred_provider=preferred_provider,
+                skip_providers=skip_providers,
             )
             if response and response.strip():
                 return response
             last_response = response
+            if preferred_provider == "gemini" and (
+                self._gemini_temporarily_disabled() or self._last_provider_issue == "gemini_rate_limited"
+            ):
+                break
             if attempt < attempts - 1:
                 await asyncio.sleep(retry_delay_seconds)
         return last_response
@@ -217,6 +276,8 @@ class EnterpriseAIService:
         raw_response: str,
         schema_hint: str,
         step_name: str,
+        preferred_provider: Optional[str] = None,
+        skip_providers: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         if not raw_response.strip():
             return None
@@ -242,6 +303,8 @@ Original output:
             f"You repair Step 2 {step_name} output into strict JSON. Return only valid JSON.",
             temperature=0.0,
             max_tokens=4000,
+            preferred_provider=preferred_provider,
+            skip_providers=skip_providers,
         )
         return self._extract_json(repaired)
 
@@ -260,11 +323,26 @@ Original output:
         response: str,
         step_name: str,
         schema_hint: str,
+        preferred_provider: Optional[str] = None,
+        repair_providers: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         result = self._extract_json(response)
         if result:
             return result
-        return await self._repair_json(response, schema_hint, step_name)
+        providers = repair_providers or ([preferred_provider] if preferred_provider else [])
+        providers = [provider for provider in providers if provider]
+        if not providers:
+            providers = self._provider_sequence()
+        for provider in providers:
+            repaired = await self._repair_json(
+                response,
+                schema_hint,
+                step_name,
+                preferred_provider=provider,
+            )
+            if repaired:
+                return repaired
+        return None
 
     async def _run_json_analysis(
         self,
@@ -276,45 +354,75 @@ Original output:
         max_tokens: int = 2500,
         timeout_seconds: float = STEP2_TASK_TIMEOUT_SECONDS,
     ) -> Dict[str, Any]:
-        try:
-            response = await asyncio.wait_for(
-                self._call_ai_with_retries(
-                    prompt,
-                    system_prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    json_mode=True,
-                ),
-                timeout=timeout_seconds,
+        providers = self._provider_sequence()
+        last_timeout = False
+        for provider in providers:
+            try:
+                response = await asyncio.wait_for(
+                    self._call_ai_with_retries(
+                        prompt,
+                        system_prompt,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        json_mode=True,
+                        preferred_provider=provider,
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                last_timeout = True
+                continue
+
+            repair_order = (
+                [candidate for candidate in providers if candidate != provider] + [provider]
+                if provider == "gemini"
+                else [provider] + [candidate for candidate in providers if candidate != provider]
             )
-        except asyncio.TimeoutError as exc:
-            raise ActualAIRequiredError(
-                f"Step 2 {step_name} timed out while waiting for AI output. The active provider did not finish in time."
-            ) from exc
-
-        json_result = await self._coerce_json_result(response, step_name, schema_hint)
-        if json_result:
-            return json_result
-
-        try:
-            fallback_response = await asyncio.wait_for(
-                self._call_ai_with_retries(
-                    prompt,
-                    system_prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    json_mode=False,
-                ),
-                timeout=timeout_seconds,
+            json_result = await self._coerce_json_result(
+                response,
+                step_name,
+                schema_hint,
+                preferred_provider=provider,
+                repair_providers=repair_order,
             )
-        except asyncio.TimeoutError as exc:
-            raise ActualAIRequiredError(
-                f"Step 2 {step_name} timed out while retrying AI output recovery."
-            ) from exc
+            if json_result:
+                return json_result
 
-        fallback_result = await self._coerce_json_result(fallback_response, step_name, schema_hint)
-        if fallback_result:
-            return fallback_result
+            if provider == "gemini" and (
+                self._gemini_temporarily_disabled() or self._last_provider_issue == "gemini_rate_limited"
+            ):
+                continue
+
+            try:
+                fallback_response = await asyncio.wait_for(
+                    self._call_ai_with_retries(
+                        prompt,
+                        system_prompt,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        json_mode=False,
+                        preferred_provider=provider,
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                last_timeout = True
+                continue
+
+            fallback_result = await self._coerce_json_result(
+                fallback_response,
+                step_name,
+                schema_hint,
+                preferred_provider=provider,
+                repair_providers=repair_order,
+            )
+            if fallback_result:
+                return fallback_result
+
+        if last_timeout:
+            raise ActualAIRequiredError(
+                f"Step 2 {step_name} timed out while waiting for AI output. The active providers did not finish in time."
+            )
 
         if self._last_provider_issue == "gemini_rate_limited" and not self.groq_client:
             raise ActualAIRequiredError(
