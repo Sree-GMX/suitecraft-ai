@@ -16,6 +16,7 @@ import time
 
 STEP1_SECTION_CONCURRENCY = 4
 STEP1_GEMINI_SECTION_CONCURRENCY = 1
+STEP1_GROQ_SECTION_CONCURRENCY = 1
 STEP1_SECTION_TIMEOUT_SECONDS = 20
 STEP1_OVERVIEW_TIMEOUT_SECONDS = 20
 GEMINI_MAX_RETRIES = 2
@@ -58,6 +59,10 @@ class AIService:
         if self.use_ollama:
             providers.append("ollama")
         return providers
+
+    def _primary_provider(self) -> Optional[str]:
+        providers = self._provider_sequence()
+        return providers[0] if providers else None
 
     def _gemini_temporarily_disabled(self) -> bool:
         return bool(self._gemini_disabled_until and time.monotonic() < self._gemini_disabled_until)
@@ -207,6 +212,7 @@ class AIService:
             return content
         except Exception:
             self._last_provider_issue = "groq_exception"
+            logger.exception("Groq Step 1 request failed")
             return ""
 
     async def _call_provider(
@@ -1183,7 +1189,9 @@ Return ONLY valid JSON:
     ) -> List[Dict[str, Any]]:
         max_parallel_tasks = (
             STEP1_GEMINI_SECTION_CONCURRENCY
-            if self.use_gemini and self.gemini_api_key
+            if self._primary_provider() == "gemini"
+            else STEP1_GROQ_SECTION_CONCURRENCY
+            if self._primary_provider() == "groq"
             else STEP1_SECTION_CONCURRENCY
         )
         semaphore = asyncio.Semaphore(max_parallel_tasks)
@@ -1197,6 +1205,13 @@ Return ONLY valid JSON:
             for section, meta in list(candidate_sections.items())[:6]
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        failures = [result for result in results if isinstance(result, Exception)]
+        if failures:
+            logger.warning(
+                "Step 1 candidate section analysis dropped %s failed batch(es): %s",
+                len(failures),
+                "; ".join(f"{type(error).__name__}: {error}" for error in failures[:3]),
+            )
         return [result for result in results if isinstance(result, dict)]
     
     async def generate_test_plan(

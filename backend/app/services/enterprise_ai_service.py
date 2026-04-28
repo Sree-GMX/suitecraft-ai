@@ -17,6 +17,7 @@ import time
 
 STEP2_CONCURRENT_BATCHES = 3
 STEP2_GEMINI_CONCURRENT_BATCHES = 1
+STEP2_GROQ_CONCURRENT_BATCHES = 1
 STEP2_TASK_TIMEOUT_SECONDS = 25
 GEMINI_MAX_RETRIES = 2
 GEMINI_COOLDOWN_SECONDS = 15 * 60
@@ -62,6 +63,10 @@ class EnterpriseAIService:
         if self.use_ollama:
             providers.append("ollama")
         return providers
+
+    def _primary_provider(self) -> Optional[str]:
+        providers = self._provider_sequence()
+        return providers[0] if providers else None
 
     def _gemini_temporarily_disabled(self) -> bool:
         return bool(self._gemini_disabled_until and time.monotonic() < self._gemini_disabled_until)
@@ -199,6 +204,7 @@ class EnterpriseAIService:
                         return result
                 except Exception:
                     self._last_provider_issue = "groq_exception"
+                    logger.exception("Groq Step 2 request failed")
                 continue
 
             if provider != "ollama":
@@ -477,7 +483,7 @@ Original output:
         # Gemini free-tier is prone to throttling on simultaneous JSON calls, so
         # keep the richer parallel path for other providers and use a safer
         # sequential path when Gemini is the active backend.
-        if self.use_gemini and self.gemini_api_key:
+        if self._primary_provider() in {"gemini", "groq"}:
             po_analysis = await self._product_owner_analysis(context)
             pm_analysis = await self._product_manager_analysis(context)
             parallel_product_tracks = 1
@@ -881,7 +887,9 @@ Return ONLY valid JSON:
 
         max_parallel_batches = (
             STEP2_GEMINI_CONCURRENT_BATCHES
-            if self.use_gemini and self.gemini_api_key
+            if self._primary_provider() == "gemini"
+            else STEP2_GROQ_CONCURRENT_BATCHES
+            if self._primary_provider() == "groq"
             else STEP2_CONCURRENT_BATCHES
         )
         semaphore = asyncio.Semaphore(max_parallel_batches)
@@ -928,6 +936,13 @@ Return ONLY valid JSON:
         )
 
         successful_batches = [result for result in batch_results if isinstance(result, dict)]
+        failures = [result for result in batch_results if isinstance(result, Exception)]
+        if failures:
+            logger.warning(
+                "Step 2 test-engineer analysis dropped %s failed batch(es): %s",
+                len(failures),
+                "; ".join(f"{type(error).__name__}: {error}" for error in failures[:3]),
+            )
         if not successful_batches:
             raise ActualAIRequiredError(
                 "Step 2 test-engineer analysis did not receive valid AI JSON output from any parallel batch."
